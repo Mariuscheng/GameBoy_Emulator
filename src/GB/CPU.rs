@@ -142,17 +142,17 @@ impl CPU {
             let pc_now = self.registers.get_pc();
             if pc_now == 0x0038 {
                 let sp = self.registers.get_sp();
-                let lo = self.memory.read(sp);
-                let hi = self.memory.read(sp.wrapping_add(1));
-                println!(
-                    "[CPU] Hit PC=0038 (RST 38). SP={:04X} TOP=[{:02X} {:02X}] IE={:02X} IF={:02X} IME={}",
-                    sp,
-                    lo,
-                    hi,
-                    self.read_ie(),
-                    self.read_if(),
-                    self.ime
-                );
+                let _lo = self.memory.read(sp);
+                let _hi = self.memory.read(sp.wrapping_add(1));
+                // println!(
+                //     "[CPU] Hit PC=0038 (RST 38). SP={:04X} TOP=[{:02X} {:02X}] IE={:02X} IF={:02X} IME={}",
+                //     sp,
+                //     lo,
+                //     hi,
+                //     self.read_ie(),
+                //     self.read_if(),
+                //     self.ime
+                // );
                 self.dbg_hit_rst38_once = true;
             }
         }
@@ -224,16 +224,16 @@ impl CPU {
         } else {
             // Unknown opcode: log once, then treat as NOP
             if !self.dbg_unknown_once {
-                let pc_before = self
+                let _pc_before = self
                     .registers
                     .get_pc()
                     .wrapping_sub(1 + if cb_prefix { 1 } else { 0 });
-                println!(
-                    "[CPU] Unknown opcode {:02X}{} at PC={:04X}",
-                    opcode,
-                    if cb_prefix { " (CB prefix)" } else { "" },
-                    pc_before
-                );
+                // println!(
+                //     "[CPU] Unknown opcode {:02X}{} at PC={:04X}",
+                //     opcode,
+                //     if cb_prefix { " (CB prefix)" } else { "" },
+                //     pc_before
+                // );
                 self.dbg_unknown_once = true;
             }
             self.cycles = self.cycles.wrapping_add(4);

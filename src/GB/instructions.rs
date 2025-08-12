@@ -152,6 +152,7 @@ static STOP: Instruction = Instruction {
     execute: stop_exec,
 };
 // 指令結構
+#[allow(dead_code)]
 pub struct Instruction {
     pub opcode: u8,
     pub name: &'static str,
@@ -162,6 +163,7 @@ pub struct Instruction {
 }
 
 // 旗標 enum
+#[allow(dead_code)]
 pub enum FlagBits {
     Z = 0b1000_0000,
     N = 0b0100_0000,

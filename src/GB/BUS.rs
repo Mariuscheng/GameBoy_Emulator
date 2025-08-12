@@ -69,6 +69,8 @@ pub struct Bus {
     // debug once-only markers
     dbg_lcdc_first_write_done: bool,
     dbg_vram_first_write_done: bool,
+    #[allow(dead_code)]
+    apu_dbg_printed: bool,
     // APU (very minimal): mirror of 0xFF10..=0xFF3F and a handle to synth
     apu_regs: [u8; 0x30],
     apu_synth: Option<Arc<Mutex<SimpleAPUSynth>>>,
@@ -120,6 +122,7 @@ impl Bus {
             win_line: 0,
             dbg_lcdc_first_write_done: false,
             dbg_vram_first_write_done: false,
+            apu_dbg_printed: false,
             apu_regs: [0; 0x30],
             apu_synth: None,
         }
@@ -128,35 +131,40 @@ impl Bus {
     // Attach a simple synth so that APU register writes can generate audio
     pub fn attach_synth(&mut self, synth: Arc<Mutex<SimpleAPUSynth>>) {
         self.apu_synth = Some(synth);
-    // Apply current register state to synth immediately
-    self.apu_update_synth(true);
+        // Apply current register state to synth immediately
+        self.apu_update_synth(true);
     }
 
     fn apu_update_synth(&mut self, just_triggered: bool) {
         if let Some(ref synth) = self.apu_synth {
             if let Ok(mut s) = synth.lock() {
                 // NR52 Master
-                let nr52 = self.apu_regs[0x26 - 0x10];
+                let nr52 = self.apu_regs[(0x26 - 0x10) as usize];
                 s.master_enable = (nr52 & 0x80) != 0;
                 if !s.master_enable {
                     s.ch1_enable = false;
+                    s.ch2_enable = false;
                 }
+                // NR51 Routing (0xFF25): bit0..3 R, bit4..7 L; if both sides off, treat as muted
+                let nr51 = self.apu_regs[(0x25 - 0x10) as usize];
+                let ch1_routed = ((nr51 & 0x01) != 0) || ((nr51 & 0x10) != 0);
+                let ch2_routed = ((nr51 & 0x02) != 0) || ((nr51 & 0x20) != 0);
                 // CH1 duty (NR11)
-                let nr11 = self.apu_regs[0x11];
+                let nr11 = self.apu_regs[(0x11 - 0x10) as usize]; // offset 0x01
                 s.ch1_duty = (nr11 >> 6) & 0x03;
                 // CH1 volume (NR12 upper nibble)
-                let nr12 = self.apu_regs[0x12];
+                let nr12 = self.apu_regs[(0x12 - 0x10) as usize]; // offset 0x02
                 let init_vol = (nr12 >> 4) & 0x0F;
                 // Master volume (NR50): average L(4..6) & R(0..2)
-                let nr50 = self.apu_regs[0x24];
+                let nr50 = self.apu_regs[(0x24 - 0x10) as usize]; // offset 0x14
                 let l = ((nr50 >> 4) & 0x07) as f32;
                 let r = (nr50 & 0x07) as f32;
                 let master = ((l + r) / 2.0) / 7.0; // 0..1
                 let base = (init_vol as f32) / 15.0;
                 s.ch1_volume = base * master;
                 // CH1 frequency from NR13/NR14 (lower 3)
-                let n_lo = self.apu_regs[0x13] as u16;
-                let nr14 = self.apu_regs[0x14];
+                let n_lo = self.apu_regs[(0x13 - 0x10) as usize] as u16; // offset 0x03
+                let nr14 = self.apu_regs[(0x14 - 0x10) as usize]; // offset 0x04
                 let n_hi = (nr14 as u16) & 0x07;
                 let n = (n_hi << 8) | n_lo;
                 if n < 2048 {
@@ -166,10 +174,54 @@ impl Bus {
                 }
                 // Trigger (NR14 bit7)
                 if s.master_enable && ((nr14 & 0x80) != 0 || just_triggered) {
-                    s.ch1_enable = s.ch1_volume > 0.0 && s.ch1_freq_hz > 0.0;
-                    // Reset phase for a clean start
-                    // SAFETY: field is private; use trick by reassigning struct (not necessary here in Rust)
-                    // We can approximate by toggling volume shortly; instead, we set phase via mem swap if needed.
+                    s.ch1_enable = ch1_routed && s.ch1_volume > 0.0 && s.ch1_freq_hz > 0.0;
+                    s.trigger();
+                    // if !self.apu_dbg_printed {
+                    //     println!(
+                    //         "[APU] CH1 trigger: freq={:.1}Hz vol={:.2} master={}",
+                    //         s.ch1_freq_hz,
+                    //         s.ch1_volume,
+                    //         ((nr52 & 0x80) != 0)
+                    //     );
+                    //     self.apu_dbg_printed = true;
+                    // }
+                }
+                // If routing changed while playing, update enable accordingly (still simplified)
+                if s.master_enable && !((nr14 & 0x80) != 0 || just_triggered) {
+                    s.ch1_enable = ch1_routed && s.ch1_volume > 0.0 && s.ch1_freq_hz > 0.0;
+                }
+
+                // CH2: NR21..NR24
+                let nr21 = self.apu_regs[(0x16 - 0x10) as usize]; // duty in bits6..7
+                s.ch2_duty = (nr21 >> 6) & 0x03;
+                let nr22 = self.apu_regs[(0x17 - 0x10) as usize];
+                let init2 = (nr22 >> 4) & 0x0F;
+                let base2 = (init2 as f32) / 15.0;
+                s.ch2_volume = base2 * master;
+                let n2_lo = self.apu_regs[(0x18 - 0x10) as usize] as u16;
+                let nr24 = self.apu_regs[(0x19 - 0x10) as usize];
+                let n2_hi = (nr24 as u16) & 0x07;
+                let n2 = (n2_hi << 8) | n2_lo;
+                if n2 < 2048 {
+                    s.ch2_freq_hz = 131_072.0 / (2048 - n2) as f32;
+                } else {
+                    s.ch2_freq_hz = 0.0;
+                }
+                if s.master_enable && (nr24 & 0x80) != 0 {
+                    s.ch2_enable = ch2_routed && s.ch2_volume > 0.0 && s.ch2_freq_hz > 0.0;
+                    s.trigger();
+                    // if !self.apu_dbg_printed {
+                    //     println!(
+                    //         "[APU] CH2 trigger: freq={:.1}Hz vol={:.2} master={}",
+                    //         s.ch2_freq_hz,
+                    //         s.ch2_volume,
+                    //         ((nr52 & 0x80) != 0)
+                    //     );
+                    //     self.apu_dbg_printed = true;
+                    // }
+                }
+                if s.master_enable && (nr24 & 0x80) == 0 {
+                    s.ch2_enable = ch2_routed && s.ch2_volume > 0.0 && s.ch2_freq_hz > 0.0;
                 }
             }
         }
@@ -215,13 +267,13 @@ impl Bus {
         self.mbc3_rtc_sel = None;
         self.mbc3_rtc_regs = [0; 5];
         // Note: We no longer mirror ROM into RAM for 0x0000..0x7FFF; reads go via self.rom
-        println!(
-            "[Bus] ROM loaded: {} bytes, banks={}, MBC={:?}, extRAM={} bytes",
-            self.rom.len(),
-            self.rom_banks,
-            self.mbc,
-            self.ext_ram.len()
-        );
+        // println!(
+        //     "[Bus] ROM loaded: {} bytes, banks={}, MBC={:?}, extRAM={} bytes",
+        //     self.rom.len(),
+        //     self.rom_banks,
+        //     self.mbc,
+        //     self.ext_ram.len()
+        // );
     }
 
     #[inline]
@@ -740,20 +792,20 @@ impl Bus {
             }
             0xFF40 => {
                 if !self.dbg_lcdc_first_write_done {
-                    println!(
-                        "[PPU] LCDC first write: {:02X} (LCD {} | BG={} WIN={} OBJ={})",
-                        val,
-                        if (val & 0x80) != 0 { "ON" } else { "OFF" },
-                        (val & 0x01) != 0,
-                        (val & 0x20) != 0,
-                        (val & 0x02) != 0
-                    );
+                    // println!(
+                    //     "[PPU] LCDC first write: {:02X} (LCD {} | BG={} WIN={} OBJ={})",
+                    //     val,
+                    //     if (val & 0x80) != 0 { "ON" } else { "OFF" },
+                    //     (val & 0x01) != 0,
+                    //     (val & 0x20) != 0,
+                    //     (val & 0x02) != 0
+                    // );
                     self.dbg_lcdc_first_write_done = true;
                 }
                 let prev = self.lcdc;
                 self.lcdc = val;
                 if (prev & 0x80) == 0 && (val & 0x80) != 0 {
-                    println!("[PPU] LCDC turned ON (bit7 rising edge)");
+                    // println!("[PPU] LCDC turned ON (bit7 rising edge)");
                     // New frame when turning on LCD
                     self.win_line = 0;
                 }
@@ -826,6 +878,7 @@ impl Bus {
                             if let Ok(mut s) = synth.lock() {
                                 s.master_enable = false;
                                 s.ch1_enable = false;
+                                s.ch2_enable = false;
                             }
                         }
                     }
@@ -885,16 +938,16 @@ impl Bus {
                 if (self.lcdc & 0x80) != 0 && self.ppu_mode == 3 { /* ignore */
                 } else {
                     if !self.dbg_vram_first_write_done {
-                        println!(
-                            "[PPU] First VRAM write @{:04X} = {:02X} | LCDC={:02X} LY={} STAT={:02X}",
-                            addr,
-                            val,
-                            self.lcdc,
-                            self.ly,
-                            0x80 | (self.stat_w & 0x78)
-                                | (if self.ly == self.lyc { 0x04 } else { 0 })
-                                | (self.ppu_mode & 0x03)
-                        );
+                        // println!(
+                        //     "[PPU] First VRAM write @{:04X} = {:02X} | LCDC={:02X} LY={} STAT={:02X}",
+                        //     addr,
+                        //     val,
+                        //     self.lcdc,
+                        //     self.ly,
+                        //     0x80 | (self.stat_w & 0x78)
+                        //         | (if self.ly == self.lyc { 0x04 } else { 0 })
+                        //         | (self.ppu_mode & 0x03)
+                        // );
                         self.dbg_vram_first_write_done = true;
                     }
                     self.ram.write(addr, val)
@@ -912,12 +965,6 @@ impl Bus {
     }
 
     // Optional helpers
-    pub fn set_joypad_state(&mut self, p1: u8) {
-        // Back-compat: try to infer rows from combined value
-        self.joyp_dpad = p1 & 0x0F;
-        self.joyp_btns = p1 & 0x0F;
-        self.p1 = 0xC0 | (self.p1_sel & 0x30) | (p1 & 0x0F);
-    }
     pub fn set_joypad_rows(&mut self, dpad_low_nibble: u8, btn_low_nibble: u8) {
         self.joyp_dpad = dpad_low_nibble & 0x0F;
         self.joyp_btns = btn_low_nibble & 0x0F;

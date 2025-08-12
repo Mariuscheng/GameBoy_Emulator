@@ -91,6 +91,7 @@ impl Registers {
     pub fn set_flags(&mut self, flags: Flags) {
         self.f = flags;
     }
+    #[allow(dead_code)]
     pub fn set_flag(&mut self, flag: Flags, on: bool) {
         if on {
             self.f.insert(flag);

@@ -169,6 +169,7 @@ impl SdlDisplay {
     }
 
     /// 檢查某個實體鍵是否按下（以 Scancode 判斷）
+    #[allow(dead_code)]
     pub fn is_scancode_down(&mut self, sc: Scancode) -> bool {
         let kb = self.event_pump.keyboard_state();
         kb.is_scancode_pressed(sc)
