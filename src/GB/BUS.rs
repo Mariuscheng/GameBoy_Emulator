@@ -806,12 +806,18 @@ impl Bus {
         self.scan_events.clear();
     }
 
+    #[allow(dead_code)]
     pub fn get_fb_pixel(&self, x: usize, y: usize) -> u8 {
         if x < 160 && y < 144 {
             self.framebuffer[y * 160 + x]
         } else {
             0
         }
+    }
+
+    /// 直接取得整個 160x144 灰階 framebuffer（0..3），避免逐像素呼叫造成額外開銷
+    pub fn framebuffer(&self) -> &[u8] {
+        &self.framebuffer
     }
 
     #[inline]

@@ -198,6 +198,8 @@ fn main() {
     let mut rt_anchor = Instant::now();
     let mut cycles_anchor = cpu.cycles;
 
+    // 重用一個 shades 緩衝區，避免每幀配置
+    let mut shades_buf = vec![0u8; 160 * 144];
     while !quit {
         // 以指令為粒度執行
         let _taken = cpu.execute_next();
@@ -268,14 +270,11 @@ fn main() {
         let in_vblank = cpu.memory.read(0xFF44) >= 144;
         if in_vblank && !prev_in_vblank {
             frame_counter += 1;
-            let mut shades = vec![0u8; 160 * 144];
-            for y in 0..144usize {
-                for x in 0..160usize {
-                    shades[y * 160 + x] = cpu.memory.get_fb_pixel(x, y);
-                }
-            }
+            // 直接取用 framebuffer 並複製到 shades_buf
+            let fb = cpu.memory.framebuffer();
+            shades_buf.copy_from_slice(fb);
             // 不再在 LCD 關閉時強制清白，保留上一幀內容以符合多數真機觀感
-            let _ = display.blit_framebuffer(&shades);
+            let _ = display.blit_framebuffer(&shades_buf);
 
             // 每 30 幀偵測一次 VRAM/Tilemap 是否已有內容，方便除錯
             if frame_counter % 30 == 0 {
