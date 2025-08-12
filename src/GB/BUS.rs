@@ -31,7 +31,10 @@ pub struct Bus {
     ie: u8,  // 0xFFFF
     ifl: u8, // 0xFF0F
     // Joypad
-    p1: u8, // 0xFF00
+    p1: u8,        // 0xFF00 (legacy snapshot)
+    p1_sel: u8,    // selection bits (only bits4..5 matter): 1=unselected, 0=selected
+    joyp_dpad: u8, // low nibble active-low: Right/Left/Up/Down
+    joyp_btns: u8, // low nibble active-low: A/B/Select/Start
     // Timer
     div: u8,  // 0xFF04
     tima: u8, // 0xFF05
@@ -59,6 +62,8 @@ pub struct Bus {
     // internal counters
     div_counter: u32,
     tima_counter: u32,
+    // Window internal line counter (increments only when window is drawn)
+    win_line: u8,
     // debug once-only markers
     dbg_lcdc_first_write_done: bool,
     dbg_vram_first_write_done: bool,
@@ -82,7 +87,10 @@ impl Bus {
             mbc3_rtc_regs: [0; 5],
             ie: 0x00,
             ifl: 0x00,
-            p1: 0xFF, // default: all inputs high, no selection
+            p1: 0xFF,     // default
+            p1_sel: 0x30, // both unselected
+            joyp_dpad: 0x0F,
+            joyp_btns: 0x0F,
             div: 0x00,
             tima: 0x00,
             tma: 0x00,
@@ -104,6 +112,7 @@ impl Bus {
             framebuffer: [0; 160 * 144],
             div_counter: 0,
             tima_counter: 0,
+            win_line: 0,
             dbg_lcdc_first_write_done: false,
             dbg_vram_first_write_done: false,
         }
@@ -374,13 +383,15 @@ impl Bus {
             let tilemap = self.bg_tilemap_base();
             let signed = self.bg_tiledata_signed();
             let row_in_tile = (v & 7) as u16;
-            let tile_row = (v >> 3) as u16;
+            // Wrap to 32x32 tilemap
+            let tile_row = ((v >> 3) & 31) as u16;
             for x in 0..160u16 {
                 let h = (x.wrapping_add(scx)) & 0xFF;
-                let tile_col = (h >> 3) as u16;
-                let map_index = tile_row * 32 + tile_col;
+                let tile_col = ((h >> 3) & 31) as u16;
+                let map_index = tile_row * 32 + tile_col; // 0..=1023
                 let tile_id = self.ram.read(tilemap + map_index);
                 let tile_addr = if signed {
+                    // 0x8800 signed addressing: index -128..127 maps to 0x9000 + idx*16
                     let idx = tile_id as i8 as i16;
                     let base = 0x9000i32 + (idx as i32) * 16;
                     base as u16
@@ -397,29 +408,42 @@ impl Bus {
                 bg_color_idx[x as usize] = color;
                 shades[x as usize] = shade;
             }
+        } else {
+            // BG disabled: color index treated as 0 so sprites are visible
+            for x in 0..160usize {
+                bg_color_idx[x] = 0;
+                shades[x] = 0;
+            }
         }
 
         // Window overlays BG
         if (self.lcdc & 0x20) != 0 && (self.lcdc & 0x01) != 0 {
             let wy = self.wy as u16;
-            if (self.ly as u16) >= wy {
+            let window_may_draw = (self.ly as u16) >= wy && (self.wx as u16) <= 166;
+            if window_may_draw {
+                // Window tile map select is LCDC bit 6
                 let tilemap = if (self.lcdc & 0x40) != 0 {
                     0x9C00
                 } else {
                     0x9800
                 };
                 let signed = self.bg_tiledata_signed();
-                let wy_line = (self.ly as u16).wrapping_sub(wy);
+                // Use internal window line counter instead of (LY-WY)
+                let wy_line = self.win_line as u16;
                 let row_in_tile = (wy_line & 7) as u16;
-                let tile_row = (wy_line >> 3) as u16;
+                let tile_row = ((wy_line >> 3) & 31) as u16;
                 let wx = self.wx as i16 - 7;
+                if wx as i32 > 159 { /* window starts past right edge: nothing to draw */ }
                 for x in 0..160i16 {
                     if x < wx {
                         continue;
                     }
                     let wx_col = (x - wx) as u16;
-                    let tile_col = (wx_col >> 3) as u16;
-                    let map_index = tile_row * 32 + tile_col;
+                    if wx_col >= 160 {
+                        break;
+                    } // clamp window width to visible 160px
+                    let tile_col = ((wx_col >> 3) & 31) as u16;
+                    let map_index = tile_row * 32 + tile_col; // 0..=1023
                     let tile_id = self.ram.read(tilemap + map_index);
                     let tile_addr = if signed {
                         let idx = tile_id as i8 as i16;
@@ -441,6 +465,8 @@ impl Bus {
                         shades[xi] = shade;
                     }
                 }
+                // Increment window line counter after drawing a visible window line
+                self.win_line = self.win_line.wrapping_add(1);
             }
         }
 
@@ -448,6 +474,8 @@ impl Bus {
         if (self.lcdc & 0x02) != 0 {
             let obj_size_8x16 = (self.lcdc & 0x04) != 0;
             let mut sprite_written = [false; 160];
+            // DMG 每掃描線最多繪 10 個 sprite
+            let mut drawn_on_line = 0u8;
             for i in 0..40u16 {
                 let oam = 0xFE00 + i * 4;
                 let sy = self.ram.read(oam) as i16 - 16;
@@ -467,14 +495,24 @@ impl Bus {
                 if y < sy || y >= sy + height {
                     continue;
                 }
+                if drawn_on_line >= 10 {
+                    continue;
+                }
                 let mut row = (y - sy) as u16;
                 if yflip {
                     row = (height - 1) as u16 - row;
                 }
                 if obj_size_8x16 {
+                    // For 8x16 sprites, the tile index refers to the top tile; bottom is +1
                     tile &= 0xFE;
                 }
-                let tile_addr = 0x8000u16 + (tile as u16) * 16 + (row as u16) * 2;
+                let tile_index = if obj_size_8x16 {
+                    tile.wrapping_add(((row / 8) as u8) & 1)
+                } else {
+                    tile
+                };
+                let tile_row = row % 8;
+                let tile_addr = 0x8000u16 + (tile_index as u16) * 16 + (tile_row as u16) * 2;
                 let lo = self.ram.read(tile_addr);
                 let hi = self.ram.read(tile_addr + 1);
                 for px in 0..8u16 {
@@ -503,6 +541,7 @@ impl Bus {
                     shades[xi] = shade;
                     sprite_written[xi] = true;
                 }
+                drawn_on_line = drawn_on_line.saturating_add(1);
             }
         }
 
@@ -544,7 +583,20 @@ impl Bus {
             0xFF45 => self.lyc,
             0xFFFF => self.ie,
             0xFF0F => self.ifl | 0xE0, // upper bits often read as 1 on real HW; mask to be safe
-            0xFF00 => self.p1,
+            0xFF00 => {
+                // Compose per selection
+                let res = 0xC0 | (self.p1_sel & 0x30);
+                let mut low = 0x0F;
+                if (self.p1_sel & 0x10) == 0 {
+                    // select dpad
+                    low &= self.joyp_dpad;
+                }
+                if (self.p1_sel & 0x20) == 0 {
+                    // select buttons
+                    low &= self.joyp_btns;
+                }
+                res | (low & 0x0F)
+            }
             0xFF04 => self.div,
             0xFF05 => self.tima,
             0xFF06 => self.tma,
@@ -641,6 +693,16 @@ impl Bus {
                 self.lcdc = val;
                 if (prev & 0x80) == 0 && (val & 0x80) != 0 {
                     println!("[PPU] LCDC turned ON (bit7 rising edge)");
+                    // New frame when turning on LCD
+                    self.win_line = 0;
+                }
+                if (prev & 0x80) != 0 && (val & 0x80) == 0 {
+                    // LCD turned off
+                    self.win_line = 0;
+                }
+                // Reset window line counter when window enable (bit 5) toggles
+                if ((prev ^ val) & 0x20) != 0 {
+                    self.win_line = 0;
                 }
             }
             0xFF41 => self.stat_w = val & 0x78, // only bits 3..6 writable
@@ -651,11 +713,17 @@ impl Bus {
                 self.ly = 0;
                 self.ppu_line_cycle = 0;
                 self.ppu_mode = 2;
+                self.win_line = 0;
             }
             0xFF45 => self.lyc = val,
             0xFFFF => self.ie = val,
             0xFF0F => self.ifl = val & 0x1F,
-            0xFF00 => self.p1 = val,
+            0xFF00 => {
+                // Only bits 4..5 are writable selection control on DMG
+                self.p1_sel = (val & 0x30) | 0x00; // keep only selection bits
+                // Keep snapshot for debug
+                self.p1 = 0xC0 | (self.p1_sel & 0x30);
+            }
             0xFF04 => {
                 // writing any value resets DIV
                 self.div = 0x00;
@@ -677,7 +745,13 @@ impl Bus {
             0xFF47 => self.bgp = val,
             0xFF48 => self.obp0 = val,
             0xFF49 => self.obp1 = val,
-            0xFF4A => self.wy = val,
+            0xFF4A => {
+                self.wy = val;
+                // If WY moved above current LY, ensure next activation starts at 0
+                if self.ly < self.wy {
+                    self.win_line = 0;
+                }
+            }
             0xFF4B => self.wx = val,
             // Cart RAM / RTC
             0xA000..=0xBFFF => {
@@ -754,7 +828,14 @@ impl Bus {
 
     // Optional helpers
     pub fn set_joypad_state(&mut self, p1: u8) {
-        self.p1 = p1;
+        // Back-compat: try to infer rows from combined value
+        self.joyp_dpad = p1 & 0x0F;
+        self.joyp_btns = p1 & 0x0F;
+        self.p1 = 0xC0 | (self.p1_sel & 0x30) | (p1 & 0x0F);
+    }
+    pub fn set_joypad_rows(&mut self, dpad_low_nibble: u8, btn_low_nibble: u8) {
+        self.joyp_dpad = dpad_low_nibble & 0x0F;
+        self.joyp_btns = btn_low_nibble & 0x0F;
     }
     #[allow(dead_code)]
     pub fn request_interrupt(&mut self, mask: u8) {
@@ -806,8 +887,8 @@ impl Bus {
                     (1u8, 456u32)
                 } else if self.ppu_line_cycle < 80 {
                     (2u8, 80u32)
-                } else if self.ppu_line_cycle < 252 {
-                    (3u8, 252u32)
+                } else if self.ppu_line_cycle < 248 {
+                    (3u8, 248u32)
                 } else {
                     (0u8, 456u32)
                 };
@@ -851,6 +932,10 @@ impl Bus {
                     // End of line
                     self.ppu_line_cycle = 0;
                     self.ly = self.ly.wrapping_add(1);
+                    if self.ly == 0 {
+                        // New frame
+                        self.win_line = 0;
+                    }
                     if self.ly == 144 {
                         // Entering VBlank
                         self.ifl |= 0x01; // VBlank IF
@@ -877,6 +962,7 @@ impl Bus {
             // LCD off: reset PPU timing state
             self.ppu_mode = 0;
             self.ppu_line_cycle = 0;
+            self.win_line = 0;
         }
     }
 }

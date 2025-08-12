@@ -311,6 +311,74 @@ fn ret_exec(_instr: &Instruction, cpu: &mut crate::GB::CPU::CPU) -> u64 {
     16
 }
 
+// ------- Rotates on A (non-CB): RLCA(0x07), RRCA(0x0F), RLA(0x17), RRA(0x1F)
+fn rlca_exec(_instr: &Instruction, cpu: &mut crate::GB::CPU::CPU) -> u64 {
+    use crate::GB::registers::Flags;
+    let a = cpu.registers.get_a();
+    let c = (a >> 7) & 1; // old bit7
+    let res = (a << 1) | c;
+    cpu.registers.set_a(res);
+    let mut f = Flags::empty();
+    // On GB (not Z80), RLCA clears Z, N, H, sets C to old bit7
+    if c != 0 {
+        f.insert(Flags::C);
+    }
+    cpu.registers.set_flags(f);
+    4
+}
+
+fn rrca_exec(_instr: &Instruction, cpu: &mut crate::GB::CPU::CPU) -> u64 {
+    use crate::GB::registers::Flags;
+    let a = cpu.registers.get_a();
+    let c = a & 1; // old bit0
+    let res = (a >> 1) | (c << 7);
+    cpu.registers.set_a(res);
+    let mut f = Flags::empty();
+    if c != 0 {
+        f.insert(Flags::C);
+    }
+    cpu.registers.set_flags(f);
+    4
+}
+
+fn rla_exec(_instr: &Instruction, cpu: &mut crate::GB::CPU::CPU) -> u64 {
+    use crate::GB::registers::Flags;
+    let a = cpu.registers.get_a();
+    let old_c = if cpu.registers.flags().contains(Flags::C) {
+        1
+    } else {
+        0
+    };
+    let new_c = (a >> 7) & 1;
+    let res = (a << 1) | old_c;
+    cpu.registers.set_a(res);
+    let mut f = Flags::empty();
+    if new_c != 0 {
+        f.insert(Flags::C);
+    }
+    cpu.registers.set_flags(f);
+    4
+}
+
+fn rra_exec(_instr: &Instruction, cpu: &mut crate::GB::CPU::CPU) -> u64 {
+    use crate::GB::registers::Flags;
+    let a = cpu.registers.get_a();
+    let old_c = if cpu.registers.flags().contains(Flags::C) {
+        1
+    } else {
+        0
+    };
+    let new_c = a & 1;
+    let res = (a >> 1) | (old_c << 7);
+    cpu.registers.set_a(res);
+    let mut f = Flags::empty();
+    if new_c != 0 {
+        f.insert(Flags::C);
+    }
+    cpu.registers.set_flags(f);
+    4
+}
+
 // JP nn 指令執行範例
 fn jp_nn_exec(_instr: &Instruction, cpu: &mut crate::GB::CPU::CPU) -> u64 {
     let addr = cpu.read_u16_imm();
@@ -398,6 +466,42 @@ static RET: Instruction = Instruction {
     size: 1,
     flags: &[],
     execute: ret_exec,
+};
+
+static RLCA: Instruction = Instruction {
+    opcode: 0x07,
+    name: "RLCA",
+    cycles: 4,
+    size: 1,
+    flags: &[],
+    execute: rlca_exec,
+};
+
+static RRCA: Instruction = Instruction {
+    opcode: 0x0F,
+    name: "RRCA",
+    cycles: 4,
+    size: 1,
+    flags: &[],
+    execute: rrca_exec,
+};
+
+static RLA: Instruction = Instruction {
+    opcode: 0x17,
+    name: "RLA",
+    cycles: 4,
+    size: 1,
+    flags: &[],
+    execute: rla_exec,
+};
+
+static RRA: Instruction = Instruction {
+    opcode: 0x1F,
+    name: "RRA",
+    cycles: 4,
+    size: 1,
+    flags: &[],
+    execute: rra_exec,
 };
 
 // Generic definitions
@@ -1652,6 +1756,11 @@ macro_rules! def_instr_array {
 
 // 指令表常數
 pub static OPCODES: [Option<&'static Instruction>; 256] = def_instr_array! {
+    // Rotates on A
+    0x07 => RLCA,
+    0x0F => RRCA,
+    0x17 => RLA,
+    0x1F => RRA,
     // Simple indirect loads
     0x0A => LD_A_BC,
     0x1A => LD_A_DE,

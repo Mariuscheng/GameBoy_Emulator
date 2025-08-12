@@ -1,5 +1,4 @@
 use sdl3::audio::{AudioCallback, AudioFormat, AudioSpec, AudioStream};
-use std::time::Duration;
 
 #[allow(dead_code)]
 pub struct SquareWave {
@@ -66,8 +65,13 @@ impl AudioInterface {
             .map_err(|e| format!("SDL resume error: {:?}", e))
     }
 
+    pub fn stop(&self) -> Result<(), String> {
+        self.device
+            .pause()
+            .map_err(|e| format!("SDL pause error: {:?}", e))
+    }
+
     pub fn play_test_tone(&self) {
-        // Play for 2 seconds
-        std::thread::sleep(Duration::from_millis(2000));
+        // 讓外部自行決定播放多久；這裡僅提供存在的 callback 持續輸出
     }
 }

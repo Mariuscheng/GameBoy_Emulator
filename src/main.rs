@@ -7,7 +7,9 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
+use interface::audio::AudioInterface;
 use interface::sdl3_display::SdlDisplay;
+use sdl3::keyboard::Scancode;
 // use sdl3::keyboard::Scancode; // 熱鍵暫停使用
 // use std::time::{Duration, Instant};
 
@@ -117,6 +119,13 @@ fn main() {
     let scale = 3u32;
     let mut display = SdlDisplay::new("Rust GB", scale).expect("SDL init failed");
 
+    // 音訊：暫停播放測試方波，等待未來接上 APU 後再啟用
+    let _audio = AudioInterface::new()
+        .map_err(|e| {
+            eprintln!("Audio init error: {}", e);
+        })
+        .ok();
+
     // 以 PPU VBlank 作為畫面同步點，避免撕裂
     let mut quit = false;
     let mut frame_counter: u64 = 0;
@@ -169,9 +178,25 @@ fn main() {
         }
 
         // 輸入更新（joypad），並檢查是否退出
-        quit = display.pump_events_and_update_joypad(|p1| {
-            cpu.memory.set_joypad_state(p1);
+        quit = display.pump_events_and_update_joypad(|dpad, btns| {
+            cpu.memory.set_joypad_rows(dpad, btns);
         });
+
+        // 按鍵測試：偵測邊緣事件並印出
+        for (name, sc) in [
+            ("Right", Scancode::Right),
+            ("Left", Scancode::Left),
+            ("Up", Scancode::Up),
+            ("Down", Scancode::Down),
+            ("A(Z)", Scancode::Z),
+            ("B(X)", Scancode::X),
+            ("Select(RShift)", Scancode::RShift),
+            ("Start(Enter)", Scancode::Return),
+        ] {
+            if display.take_keydown(sc) {
+                println!("[Input] {} pressed", name);
+            }
+        }
 
         // 熱鍵功能已停用：不再改動 LCDC/VRAM 或注入任何測試畫面
 
@@ -202,12 +227,35 @@ fn main() {
                         bgmap_nonzero += 1;
                     }
                 }
+                // 額外：列印按鍵狀態摘要（每 30 幀一次）
+                let keyboard = display.event_pump.keyboard_state();
+                let keys = [
+                    ("R", Scancode::Right),
+                    ("L", Scancode::Left),
+                    ("U", Scancode::Up),
+                    ("D", Scancode::Down),
+                    ("A", Scancode::Z),
+                    ("B", Scancode::X),
+                    ("Sel", Scancode::RShift),
+                    ("Start", Scancode::Return),
+                ];
+                let mut pressed: Vec<&str> = Vec::new();
+                for (label, sc) in keys.iter() {
+                    if keyboard.is_scancode_pressed(*sc) {
+                        pressed.push(label);
+                    }
+                }
                 println!(
-                    "Frame {} | VRAM!=0: {} / 8192 | BGMap!=0: {} / 1024 | LCDC={:02X}",
+                    "Frame {} | VRAM!=0: {} / 8192 | BGMap!=0: {} / 1024 | LCDC={:02X} | Keys: {}",
                     frame_counter,
                     vram_nonzero,
                     bgmap_nonzero,
-                    cpu.memory.read(0xFF40)
+                    cpu.memory.read(0xFF40),
+                    if pressed.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        pressed.join(",")
+                    }
                 );
             }
             // 停用自動協助：不會自動更改 LCDC（完全交給 ROM 控制）

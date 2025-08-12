@@ -95,15 +95,15 @@ impl SdlDisplay {
     }
 
     /// 處理事件，回傳是否應該結束
-    pub fn pump_events_and_update_joypad<F: FnMut(u8)>(&mut self, mut set_p1: F) -> bool {
+    pub fn pump_events_and_update_joypad<F: FnMut(u8, u8)>(&mut self, mut set_p1: F) -> bool {
         // 清理本幀 KeyDown 邊緣
         self.recent_keydowns.clear();
-        // GB P1: bit4=方向選擇, bit5=按鍵選擇。被清為 0 表示選中那一群。
-        // 這裡簡化：同時選兩群(都拉低)並將按鍵低電平表示被按。
-        // 對應鍵位：
+        // GB P1: bit4=方向選擇, bit5=按鍵選擇。被清為 0 表示選中該群。
+        // 正確行為：CPU 會寫入 P1 來選群，我們應該回讀時以最近一次寫入的 P1 的 bit4/5 決定哪一群回報。
+        // 對應鍵位（方向/按鍵群各自獨立）：
         // 方向：Right, Left, Up, Down -> Arrow keys
         // 按鍵：A, B, Select, Start -> Z, X, RightShift, Enter
-        let mut p1 = 0xFFu8; // 未選時全高
+        // 只輸出兩組低四位資料（active-low）
         for event in self.event_pump.poll_iter() {
             match event {
                 Event::Quit { .. } => return true,
@@ -137,37 +137,34 @@ impl SdlDisplay {
         let select = keyboard.is_scancode_pressed(sdl3::keyboard::Scancode::RShift);
         let start = keyboard.is_scancode_pressed(sdl3::keyboard::Scancode::Return);
 
-        // 選擇兩群（清為 0）
-        p1 &= !(1 << 4);
-        p1 &= !(1 << 5);
-        // 方向群：bit0 Right, bit1 Left, bit2 Up, bit3 Down，按下時拉低
+        let mut dpad = 0x0Fu8;
+        let mut btns = 0x0Fu8;
         if right {
-            p1 &= !0x01;
+            dpad &= !0x01;
         }
         if left {
-            p1 &= !0x02;
+            dpad &= !0x02;
         }
         if up {
-            p1 &= !0x04;
+            dpad &= !0x04;
         }
         if down {
-            p1 &= !0x08;
+            dpad &= !0x08;
         }
-        // 按鍵群：bit0 A, bit1 B, bit2 Select, bit3 Start
         if a {
-            p1 &= !0x01;
+            btns &= !0x01;
         }
         if b {
-            p1 &= !0x02;
+            btns &= !0x02;
         }
         if select {
-            p1 &= !0x04;
+            btns &= !0x04;
         }
         if start {
-            p1 &= !0x08;
+            btns &= !0x08;
         }
 
-        set_p1(p1);
+        set_p1(dpad, btns);
         false
     }
 
