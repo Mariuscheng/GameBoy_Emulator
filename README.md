@@ -14,7 +14,8 @@ A small, just-for-fun Game Boy emulator written in Rust with an SDL3 front end. 
 
 1) Put your ROM(s) in the `roms/` folder. The default filename it looks for first is `roms/rom.gb`.
    The program also tries these fallbacks in order:
-   - `Super Mario Land (World).gb`
+   - `roms/rom.gb`
+   - `pokemon_yellow.gb`
    - `Tetris (Japan) (En).gb`
    - `dmg-acid2.gb`
 
@@ -52,9 +53,25 @@ Perf: 1.00x | 59.7 FPS | 4,194,304 cycles/s
 
 - Rust (stable) and Cargo
 - Windows (MSVC toolchain). Other OSes may work but are not the primary target here.
-- SDL3 runtime. If you see an error about a missing `SDL3.dll`, place it next to the built `.exe` or add it to your PATH.
+- SDL3 runtime (DLL or system package). This repo ships `SDL3lib/SDL3.lib` for linking, but you still need the SDL3 runtime on your machine.
 
-This repo includes an `SDL3lib/SDL3.lib` for linking; the runtime DLL may still be required.
+### Install SDL3 (Windows)
+
+1) Download SDL3 prebuilt binaries (Development Libraries) for Windows from the official site:
+   - https://github.com/libsdl-org/SDL/releases (look for the latest SDL3 `SDL3-*.zip` for Windows)
+
+2) Extract the archive and locate `SDL3.dll` (usually under `SDL3-*/lib/x64/SDL3.dll`).
+
+3) Place `SDL3.dll` in one of these locations:
+   - Next to the compiled executable (easiest). After a build, that is typically `target\debug\gameboy_emulator.exe` — copy `SDL3.dll` to `target\debug\`.
+   - Or add the folder containing `SDL3.dll` to your `PATH`.
+
+If you see an error about missing `SDL3.dll`, it means the runtime DLL is not being found—place/copy it next to the exe.
+
+### Install SDL3 (Linux/macOS)
+
+- Linux: use your distro packages (names may vary): `libsdl3`, `libsdl3-dev` or similar. On Debian/Ubuntu it may still be in newer repos or via `libsdl3-dev` from a PPA. Alternatively, build from source: https://github.com/libsdl-org/SDL
+- macOS: install via Homebrew if available `brew install sdl3`, or build from source.
 
 ## What works (brief)
 
@@ -82,7 +99,7 @@ This repo includes an `SDL3lib/SDL3.lib` for linking; the runtime DLL may still 
 ## Troubleshooting
 
 - "No ROM found" — ensure you placed a `.gb` file under `roms/` as `roms/rom.gb`, or pass a path after `--`.
-- "Missing SDL3.dll" — download SDL3, copy `SDL3.dll` next to the executable or set it in your PATH.
+- "Missing SDL3.dll" — download SDL3, copy `SDL3.dll` next to the executable or set it in your PATH (see Install SDL3 section).
 - White/blank screen — verify the ROM actually writes to LCDC and VRAM; check the console logs for LCDC first-write messages. Try a known-good test like `dmg-acid2.gb`.
 - Audio too loud/quiet — adjust `--volume`. If tempo feels off, adjust `--speed` slightly.
 
@@ -97,5 +114,3 @@ This is a learning/vibe project first. It prioritizes approachability and creati
 ## License
 
 TBD. If you plan to reuse parts, please open an issue or drop a note.
-
-

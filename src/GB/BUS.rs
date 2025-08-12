@@ -1,6 +1,22 @@
 use crate::GB::RAM::RAM;
 use crate::interface::audio::SimpleAPUSynth;
+use std::cmp::Ordering;
 use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum RegKind {
+    Scx,
+    Wx,
+    Bgp,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RegEvent {
+    x: u16, // pixel column 0..159 at which the new value takes effect
+    kind: RegKind,
+    val: u8,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MbcType {
@@ -66,6 +82,12 @@ pub struct Bus {
     tima_counter: u32,
     // Window internal line counter (increments only when window is drawn)
     win_line: u8,
+    // Dynamic per-line state for mid-line changes
+    line_base_scx: u8,
+    line_base_scy: u8,
+    line_base_wx: u8,
+    line_base_bgp: u8,
+    scan_events: Vec<RegEvent>,
     // debug once-only markers
     dbg_lcdc_first_write_done: bool,
     dbg_vram_first_write_done: bool,
@@ -120,11 +142,84 @@ impl Bus {
             div_counter: 0,
             tima_counter: 0,
             win_line: 0,
+            line_base_scx: 0,
+            line_base_scy: 0,
+            line_base_wx: 0,
+            line_base_bgp: 0xFC,
+            scan_events: Vec::with_capacity(64),
             dbg_lcdc_first_write_done: false,
             dbg_vram_first_write_done: false,
             apu_dbg_printed: false,
             apu_regs: [0; 0x30],
             apu_synth: None,
+        }
+    }
+
+    /// 立刻評估 STAT/LYC 相關的中斷條件，必要時設定 IF.STAT (bit1)。
+    /// - bit6：LYC=LY 中斷允許且目前相等 -> 觸發
+    /// - bit5/bit4/bit3：依目前 ppu_mode 分別對應 OAM(2)/VBlank(1)/HBlank(0) 觸發
+    #[inline]
+    fn eval_stat_irq_immediate(&mut self) {
+        // LYC=LY
+        if (self.stat_w & 0x40) != 0 && self.ly == self.lyc {
+            self.ifl |= 0x02;
+        }
+        // Mode IRQs
+        match self.ppu_mode {
+            2 => {
+                if (self.stat_w & 0x20) != 0 {
+                    self.ifl |= 0x02;
+                }
+            }
+            1 => {
+                if (self.stat_w & 0x10) != 0 {
+                    self.ifl |= 0x02;
+                }
+            }
+            0 => {
+                if (self.stat_w & 0x08) != 0 {
+                    self.ifl |= 0x02;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    fn line_cycle_to_x(&self, cyc: u32) -> u16 {
+        // Mode3 roughly 80..248 in our simple model; map 80->0 pixel
+        if cyc <= 80 {
+            0
+        } else {
+            let px = cyc - 80;
+            if px >= 160 { 159 } else { px as u16 }
+        }
+    }
+
+    #[inline]
+    fn start_mode3_line_capture(&mut self) {
+        if self.ly < 144 {
+            self.line_base_scx = self.scx;
+            self.line_base_scy = self.scy;
+            self.line_base_wx = self.wx;
+            self.line_base_bgp = self.bgp;
+            self.scan_events.clear();
+        }
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    fn record_scan_event(&mut self, kind: RegKind, val: u8) {
+        if (self.lcdc & 0x80) == 0 {
+            return;
+        }
+        if self.ppu_mode != 3 || self.ly >= 144 {
+            return;
+        }
+        let x = self.line_cycle_to_x(self.ppu_line_cycle);
+        if self.scan_events.len() < 128 {
+            self.scan_events.push(RegEvent { x, kind, val });
         }
     }
 
@@ -486,15 +581,41 @@ impl Bus {
 
         // Background
         if (self.lcdc & 0x01) != 0 {
-            let scy = self.scy as u16;
-            let scx = self.scx as u16;
+            // Build dynamic values with mid-line events
+            let scy = self.line_base_scy as u16;
+            let mut scx = self.line_base_scx as u16;
             let v = ((self.ly as u16).wrapping_add(scy)) & 0xFF;
             let tilemap = self.bg_tilemap_base();
             let signed = self.bg_tiledata_signed();
             let row_in_tile = (v & 7) as u16;
             // Wrap to 32x32 tilemap
             let tile_row = ((v >> 3) & 31) as u16;
+            // Sort events for deterministic order
+            if !self.scan_events.is_empty() {
+                self.scan_events.sort_by(|a, b| a.x.cmp(&b.x));
+            }
+            let mut ev_idx = 0usize;
             for x in 0..160u16 {
+                // apply pending events at/after this pixel
+                while ev_idx < self.scan_events.len() {
+                    let e = self.scan_events[ev_idx];
+                    match e.x.cmp(&(x as u16)) {
+                        Ordering::Less => {
+                            ev_idx += 1;
+                            continue;
+                        }
+                        Ordering::Equal => {
+                            match e.kind {
+                                RegKind::Scx => scx = e.val as u16,
+                                RegKind::Bgp => { /* palette changes handled below via shade */ }
+                                RegKind::Wx => { /* handled in window section */ }
+                            }
+                            ev_idx += 1;
+                            continue;
+                        }
+                        Ordering::Greater => break,
+                    }
+                }
                 let h = (x.wrapping_add(scx)) & 0xFF;
                 let tile_col = ((h >> 3) & 31) as u16;
                 let map_index = tile_row * 32 + tile_col; // 0..=1023
@@ -513,7 +634,15 @@ impl Bus {
                 let lo_b = (lo >> bit) & 1;
                 let hi_b = (hi >> bit) & 1;
                 let color = (hi_b << 1) | lo_b;
-                let shade = (self.bgp >> (color * 2)) & 0x03;
+                // Palette may change mid-line
+                let mut bgp = self.line_base_bgp;
+                // Apply any BGP events up to this pixel
+                for e in self.scan_events.iter().take(ev_idx) {
+                    if e.kind == RegKind::Bgp {
+                        bgp = e.val;
+                    }
+                }
+                let shade = (bgp >> (color * 2)) & 0x03;
                 bg_color_idx[x as usize] = color;
                 shades[x as usize] = shade;
             }
@@ -541,9 +670,23 @@ impl Bus {
                 let wy_line = self.win_line as u16;
                 let row_in_tile = (wy_line & 7) as u16;
                 let tile_row = ((wy_line >> 3) & 31) as u16;
-                let wx = self.wx as i16 - 7;
+                // WX may change mid-line: base from snapshot + events
+                let mut wx_val = self.line_base_wx;
+                for e in &self.scan_events {
+                    if e.x <= 0 && matches!(e.kind, RegKind::Wx) {
+                        wx_val = e.val;
+                    }
+                }
+                let wx = wx_val as i16 - 7;
                 if wx as i32 > 159 { /* window starts past right edge: nothing to draw */ }
                 for x in 0..160i16 {
+                    // update wx when we pass an event point
+                    for e in &self.scan_events {
+                        if e.kind == RegKind::Wx && (e.x as i16) == x {
+                            wx_val = e.val;
+                        }
+                    }
+                    let wx = wx_val as i16 - 7;
                     if x < wx {
                         continue;
                     }
@@ -659,6 +802,8 @@ impl Bus {
         for x in 0..160usize {
             self.framebuffer[base + x] = shades[x];
         }
+        // Clear events for next line usage
+        self.scan_events.clear();
     }
 
     pub fn get_fb_pixel(&self, x: usize, y: usize) -> u8 {
@@ -818,17 +963,33 @@ impl Bus {
                     self.win_line = 0;
                 }
             }
-            0xFF41 => self.stat_w = val & 0x78, // only bits 3..6 writable
-            0xFF42 => self.scy = val,
-            0xFF43 => self.scx = val,
+            0xFF41 => {
+                // 只允許寫入 3..6，但寫入後需立即依目前狀態評估是否產生 STAT IRQ
+                self.stat_w = val & 0x78; // only bits 3..6 writable
+                self.eval_stat_irq_immediate();
+            }
+            0xFF42 => {
+                self.scy = val;
+                // SCY mid-line generally has limited visible effect in our simple renderer; ignore
+            }
+            0xFF43 => {
+                self.scx = val;
+                self.record_scan_event(RegKind::Scx, val);
+            }
             0xFF44 => {
                 // writing any value resets LY to 0 and line cycle to start (mode 2)
                 self.ly = 0;
                 self.ppu_line_cycle = 0;
                 self.ppu_mode = 2;
                 self.win_line = 0;
+                // 依據新 LY 立即檢查 LYC=LY 與當前模式的 STAT 中斷
+                self.eval_stat_irq_immediate();
             }
-            0xFF45 => self.lyc = val,
+            0xFF45 => {
+                // 寫入 LYC 需要立刻更新 coincidence 與可能的 STAT 中斷
+                self.lyc = val;
+                self.eval_stat_irq_immediate();
+            }
             0xFFFF => self.ie = val,
             0xFF0F => self.ifl = val & 0x1F,
             0xFF00 => {
@@ -855,17 +1016,21 @@ impl Bus {
                     self.ram.write(0xFE00u16.wrapping_add(i), b);
                 }
             }
-            0xFF47 => self.bgp = val,
+            0xFF47 => {
+                self.bgp = val;
+                self.record_scan_event(RegKind::Bgp, val);
+            }
             0xFF48 => self.obp0 = val,
             0xFF49 => self.obp1 = val,
             0xFF4A => {
                 self.wy = val;
-                // If WY moved above current LY, ensure next activation starts at 0
-                if self.ly < self.wy {
-                    self.win_line = 0;
-                }
+                // Simplify: reset internal window line counter so next active line starts at 0
+                self.win_line = 0;
             }
-            0xFF4B => self.wx = val,
+            0xFF4B => {
+                self.wx = val;
+                self.record_scan_event(RegKind::Wx, val);
+            }
             0xFF10..=0xFF3F => {
                 // Mirror write and update synth
                 let idx = (addr - 0xFF10) as usize;
@@ -1019,10 +1184,15 @@ impl Bus {
                     (1u8, 456u32)
                 } else if self.ppu_line_cycle < 80 {
                     (2u8, 80u32)
-                } else if self.ppu_line_cycle < 248 {
-                    (3u8, 248u32)
                 } else {
-                    (0u8, 456u32)
+                    // Variable Mode 3 length: base 172 + SCX low 3 alignment (rough model)
+                    let mode3_len = 172u32 + ((self.scx & 0x07) as u32);
+                    let mode3_end = 80u32 + mode3_len;
+                    if self.ppu_line_cycle < mode3_end {
+                        (3u8, mode3_end)
+                    } else {
+                        (0u8, 456u32)
+                    }
                 };
                 // Handle mode transition
                 if mode != self.ppu_mode {
@@ -1048,6 +1218,8 @@ impl Bus {
                             }
                         } // HBlank
                         3 => {
+                            // Start per-line capture when entering mode 3 on a visible line
+                            self.start_mode3_line_capture();
                             if (self.stat_w & 0x10) != 0 {
                                 // Mode 3 doesn't have its own STAT bit; keep as is
                             }
@@ -1066,6 +1238,10 @@ impl Bus {
                     self.ly = self.ly.wrapping_add(1);
                     if self.ly == 0 {
                         // New frame
+                        self.win_line = 0;
+                    }
+                    if self.ly == self.wy {
+                        // Window becomes active on this line: start from first window row
                         self.win_line = 0;
                     }
                     if self.ly == 144 {
