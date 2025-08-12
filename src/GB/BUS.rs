@@ -1,4 +1,6 @@
 use crate::GB::RAM::RAM;
+use crate::interface::audio::SimpleAPUSynth;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MbcType {
@@ -67,6 +69,9 @@ pub struct Bus {
     // debug once-only markers
     dbg_lcdc_first_write_done: bool,
     dbg_vram_first_write_done: bool,
+    // APU (very minimal): mirror of 0xFF10..=0xFF3F and a handle to synth
+    apu_regs: [u8; 0x30],
+    apu_synth: Option<Arc<Mutex<SimpleAPUSynth>>>,
 }
 
 impl Bus {
@@ -115,6 +120,58 @@ impl Bus {
             win_line: 0,
             dbg_lcdc_first_write_done: false,
             dbg_vram_first_write_done: false,
+            apu_regs: [0; 0x30],
+            apu_synth: None,
+        }
+    }
+
+    // Attach a simple synth so that APU register writes can generate audio
+    pub fn attach_synth(&mut self, synth: Arc<Mutex<SimpleAPUSynth>>) {
+        self.apu_synth = Some(synth);
+    // Apply current register state to synth immediately
+    self.apu_update_synth(true);
+    }
+
+    fn apu_update_synth(&mut self, just_triggered: bool) {
+        if let Some(ref synth) = self.apu_synth {
+            if let Ok(mut s) = synth.lock() {
+                // NR52 Master
+                let nr52 = self.apu_regs[0x26 - 0x10];
+                s.master_enable = (nr52 & 0x80) != 0;
+                if !s.master_enable {
+                    s.ch1_enable = false;
+                }
+                // CH1 duty (NR11)
+                let nr11 = self.apu_regs[0x11];
+                s.ch1_duty = (nr11 >> 6) & 0x03;
+                // CH1 volume (NR12 upper nibble)
+                let nr12 = self.apu_regs[0x12];
+                let init_vol = (nr12 >> 4) & 0x0F;
+                // Master volume (NR50): average L(4..6) & R(0..2)
+                let nr50 = self.apu_regs[0x24];
+                let l = ((nr50 >> 4) & 0x07) as f32;
+                let r = (nr50 & 0x07) as f32;
+                let master = ((l + r) / 2.0) / 7.0; // 0..1
+                let base = (init_vol as f32) / 15.0;
+                s.ch1_volume = base * master;
+                // CH1 frequency from NR13/NR14 (lower 3)
+                let n_lo = self.apu_regs[0x13] as u16;
+                let nr14 = self.apu_regs[0x14];
+                let n_hi = (nr14 as u16) & 0x07;
+                let n = (n_hi << 8) | n_lo;
+                if n < 2048 {
+                    s.ch1_freq_hz = 131_072.0 / (2048 - n) as f32;
+                } else {
+                    s.ch1_freq_hz = 0.0;
+                }
+                // Trigger (NR14 bit7)
+                if s.master_enable && ((nr14 & 0x80) != 0 || just_triggered) {
+                    s.ch1_enable = s.ch1_volume > 0.0 && s.ch1_freq_hz > 0.0;
+                    // Reset phase for a clean start
+                    // SAFETY: field is private; use trick by reassigning struct (not necessary here in Rust)
+                    // We can approximate by toggling volume shortly; instead, we set phase via mem swap if needed.
+                }
+            }
         }
     }
 
@@ -607,6 +664,10 @@ impl Bus {
             0xFF4A => self.wy,
             0xFF4B => self.wx,
             0xFF46 => self.dma,
+            0xFF10..=0xFF3F => {
+                let idx = (addr - 0xFF10) as usize;
+                self.apu_regs[idx]
+            }
             // Cart RAM
             0xA000..=0xBFFF => {
                 match self.mbc {
@@ -753,6 +814,30 @@ impl Bus {
                 }
             }
             0xFF4B => self.wx = val,
+            0xFF10..=0xFF3F => {
+                // Mirror write and update synth
+                let idx = (addr - 0xFF10) as usize;
+                self.apu_regs[idx] = val;
+                let mut just_triggered = false;
+                if addr == 0xFF26 {
+                    // NR52: when disabling master, clear enables
+                    if (val & 0x80) == 0 {
+                        if let Some(ref synth) = self.apu_synth {
+                            if let Ok(mut s) = synth.lock() {
+                                s.master_enable = false;
+                                s.ch1_enable = false;
+                            }
+                        }
+                    }
+                }
+                if addr == 0xFF14 {
+                    if (val & 0x80) != 0 {
+                        // trigger
+                        just_triggered = true;
+                    }
+                }
+                self.apu_update_synth(just_triggered);
+            }
             // Cart RAM / RTC
             0xA000..=0xBFFF => {
                 match self.mbc {

@@ -7,9 +7,10 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use interface::audio::AudioInterface;
+use interface::audio::{AudioInterface, SimpleAPUSynth};
 use interface::sdl3_display::SdlDisplay;
 use sdl3::keyboard::Scancode;
+use std::sync::{Arc, Mutex};
 // use sdl3::keyboard::Scancode; // 熱鍵暫停使用
 // use std::time::{Duration, Instant};
 
@@ -119,12 +120,18 @@ fn main() {
     let scale = 3u32;
     let mut display = SdlDisplay::new("Rust GB", scale).expect("SDL init failed");
 
-    // 音訊：暫停播放測試方波，等待未來接上 APU 後再啟用
-    let _audio = AudioInterface::new()
+    // 音訊：建立簡易 APU 合成器並啟動播放
+    let synth = Arc::new(Mutex::new(SimpleAPUSynth::default()));
+    // 讓 Bus 能更新音色
+    cpu.memory.attach_synth(synth.clone());
+    let audio = AudioInterface::new_with_synth(synth.clone())
         .map_err(|e| {
             eprintln!("Audio init error: {}", e);
         })
         .ok();
+    if let Some(ref a) = audio {
+        let _ = a.start();
+    }
 
     // 以 PPU VBlank 作為畫面同步點，避免撕裂
     let mut quit = false;

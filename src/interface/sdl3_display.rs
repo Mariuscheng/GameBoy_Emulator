@@ -49,12 +49,12 @@ impl SdlDisplay {
         if shades.len() != 160 * 144 {
             return Err("framebuffer size mismatch".into());
         }
-        // DMG palette (ARGB)
+        // DMG palette (ARGB) switched to pure grayscale, white background
         let palette: [u32; 4] = [
-            0xFFE0F8D0, // 白
-            0xFF88C070, // 淺灰
-            0xFF346856, // 深灰
-            0xFF081820, // 黑
+            0xFFFFFFFF, // 白 (最亮)
+            0xFFBFBFBF, // 淺灰
+            0xFF7F7F7F, // 深灰
+            0xFF000000, // 黑
         ];
         let texture_creator = self.canvas.texture_creator();
         let mut texture = texture_creator
