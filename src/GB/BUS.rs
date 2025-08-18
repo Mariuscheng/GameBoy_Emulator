@@ -595,6 +595,7 @@ impl Bus {
                 self.scan_events.sort_by(|a, b| a.x.cmp(&b.x));
             }
             let mut ev_idx = 0usize;
+            let mut curr_bgp = self.line_base_bgp;
             for x in 0..160u16 {
                 // apply pending events at/after this pixel
                 while ev_idx < self.scan_events.len() {
@@ -607,7 +608,7 @@ impl Bus {
                         Ordering::Equal => {
                             match e.kind {
                                 RegKind::Scx => scx = e.val as u16,
-                                RegKind::Bgp => { /* palette changes handled below via shade */ }
+                                RegKind::Bgp => curr_bgp = e.val,
                                 RegKind::Wx => { /* handled in window section */ }
                             }
                             ev_idx += 1;
@@ -634,15 +635,8 @@ impl Bus {
                 let lo_b = (lo >> bit) & 1;
                 let hi_b = (hi >> bit) & 1;
                 let color = (hi_b << 1) | lo_b;
-                // Palette may change mid-line
-                let mut bgp = self.line_base_bgp;
-                // Apply any BGP events up to this pixel
-                for e in self.scan_events.iter().take(ev_idx) {
-                    if e.kind == RegKind::Bgp {
-                        bgp = e.val;
-                    }
-                }
-                let shade = (bgp >> (color * 2)) & 0x03;
+                // Use running BGP value
+                let shade = (curr_bgp >> (color * 2)) & 0x03;
                 bg_color_idx[x as usize] = color;
                 shades[x as usize] = shade;
             }
@@ -670,20 +664,28 @@ impl Bus {
                 let wy_line = self.win_line as u16;
                 let row_in_tile = (wy_line & 7) as u16;
                 let tile_row = ((wy_line >> 3) & 31) as u16;
-                // WX may change mid-line: base from snapshot + events
+                // WX may change mid-line: track running value via event index
                 let mut wx_val = self.line_base_wx;
-                for e in &self.scan_events {
-                    if e.x <= 0 && matches!(e.kind, RegKind::Wx) {
-                        wx_val = e.val;
-                    }
-                }
+                let mut ev_wx_idx = 0usize;
                 let wx = wx_val as i16 - 7;
                 if wx as i32 > 159 { /* window starts past right edge: nothing to draw */ }
                 for x in 0..160i16 {
-                    // update wx when we pass an event point
-                    for e in &self.scan_events {
-                        if e.kind == RegKind::Wx && (e.x as i16) == x {
-                            wx_val = e.val;
+                    // apply Wx events at this pixel
+                    while ev_wx_idx < self.scan_events.len() {
+                        let e = self.scan_events[ev_wx_idx];
+                        match e.x.cmp(&(x as u16)) {
+                            Ordering::Less => {
+                                ev_wx_idx += 1;
+                                continue;
+                            }
+                            Ordering::Equal => {
+                                if let RegKind::Wx = e.kind {
+                                    wx_val = e.val;
+                                }
+                                ev_wx_idx += 1;
+                                continue;
+                            }
+                            Ordering::Greater => break,
                         }
                     }
                     let wx = wx_val as i16 - 7;
