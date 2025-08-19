@@ -14,7 +14,6 @@ A small, just-for-fun Game Boy emulator written in Rust with an SDL3 front end. 
 
 1) Put your ROM(s) in the `roms/` folder. The default filename it looks for first is `roms/rom.gb`.
    The program also tries these fallbacks in order:
-   - `roms/rom.gb`
    - `pokemon_yellow.gb`
    - `Tetris (Japan) (En).gb`
    - `dmg-acid2.gb`
@@ -114,3 +113,4 @@ This is a learning/vibe project first. It prioritizes approachability and creati
 ## License
 
 TBD. If you plan to reuse parts, please open an issue or drop a note.
+
