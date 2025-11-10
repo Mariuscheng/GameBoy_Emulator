@@ -1,9 +1,9 @@
-use sdl3::Sdl;
 use sdl3::event::Event;
 use sdl3::keyboard::Scancode;
-use sdl3::pixels::{PixelFormat, PixelFormatEnum};
+use sdl3::pixels::PixelFormat;
 use sdl3::rect::Rect;
 use sdl3::video::Window;
+use sdl3::Sdl;
 use std::collections::HashSet;
 
 /// SDL3 顯示與輸入後端
@@ -58,7 +58,7 @@ impl SdlDisplay {
         ];
         let texture_creator = self.canvas.texture_creator();
         let mut texture = texture_creator
-            .create_texture_streaming(PixelFormat::from(PixelFormatEnum::ARGB8888), 160, 144)
+            .create_texture_streaming(PixelFormat::ARGB8888, 160, 144)
             .map_err(|e| format!("SDL texture error: {:?}", e))?;
         texture
             .with_lock(None, |buf: &mut [u8], pitch: usize| {

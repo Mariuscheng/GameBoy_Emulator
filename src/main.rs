@@ -78,9 +78,7 @@ fn try_load_rom(cpu: &mut GB::CPU::CPU, rom_arg: Option<String>) -> bool {
             eprintln!("ROM path not found: {} (fallback to defaults)", p.display());
         }
     }
-    let candidates = [
-        Path::new("roms/interrupt_time.gb"),
-    ];
+    let candidates = [Path::new("roms/interrupt_time.gb")];
     for p in candidates.iter() {
         if p.exists() {
             if let Ok(mut f) = fs::File::open(p) {
@@ -138,6 +136,12 @@ fn init_post_bios(cpu: &mut GB::CPU::CPU) {
     cpu.memory.write(0xFF4A, 0x00); // WY
     cpu.memory.write(0xFF4B, 0x00); // WX
     cpu.memory.write(0xFFFF, 0x00); // IE
+
+    // 寫入 VRAM 0x8000~0x8FFF 產生灰階條紋，驗證顯示路徑
+    for addr in 0x8000..0x9000u16 {
+        let shade = ((addr >> 5) & 0x03) as u8; // 每 32 bytes 一個 shade
+        cpu.memory.write(addr, shade);
+    }
 }
 
 fn main() {
@@ -309,7 +313,11 @@ fn main() {
                     _vram_nonzero,
                     _bgmap_nonzero,
                     cpu.memory.read(0xFF40),
-                    if pressed.is_empty() { "(none)".to_string() } else { pressed.join(",") }
+                    if pressed.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        pressed.join(",")
+                    }
                 );
             }
             // 停用自動協助：不會自動更改 LCDC（完全交給 ROM 控制）
@@ -324,7 +332,10 @@ fn main() {
                 let speed_x = cps / DMG_CPU_HZ;
                 let fps = (df as f64) / secs;
                 if DEBUG_FRAME_INFO {
-                    println!("Perf: {:.2}x | {:.1} FPS | {:.0} cycles/s", speed_x, fps, cps);
+                    println!(
+                        "Perf: {:.2}x | {:.1} FPS | {:.0} cycles/s",
+                        speed_x, fps, cps
+                    );
                 }
                 perf_last = Instant::now();
                 perf_last_cycles = cpu.cycles;
