@@ -1,4 +1,4 @@
-# A.I Project - GameBoy Emulator ( Not Complete)
+# A.I Script Project - GameBoy Emulator (Not Complete)
 
 This project is a GameBoy emulator written in C++ using SDL3 for graphics, input, and audio handling. The goal is to accurately emulate the original Nintendo GameBoy hardware, allowing users to play classic GameBoy games on modern systems.
 
@@ -379,3 +379,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - The SDL development team
 
 - Various open-source GameBoy emulator projects for reference
+
