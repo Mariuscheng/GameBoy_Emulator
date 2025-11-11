@@ -6,6 +6,7 @@
 #include <vector>
 #include <string>
 #include "ppu.h"
+#include "apu.h"
 
 class MMU {
 public:
@@ -30,6 +31,9 @@ public:
 
     // PPU access
     PPU& get_ppu() { return ppu; }
+
+    // APU access
+    APU& get_apu() { return apu; }
 
     // Joypad input handling
     void set_joypad_bit(int bit, bool pressed);
@@ -68,6 +72,9 @@ private:
 
     // PPU
     PPU ppu;
+
+    // APU
+    APU apu;
 
     // Interrupt registers
     uint8_t interrupt_flag; // IF (0xFF0F)

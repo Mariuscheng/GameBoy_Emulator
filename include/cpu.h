@@ -51,11 +51,17 @@ public:
     // Interrupt master enable
     bool ime;
 
+    // CPU state
+    bool halted;
+
     // Methods
     void reset();
-    void step();
+    int step(); // Returns number of cycles executed
     void handle_interrupt(uint8_t interrupt_type);
     void execute_instruction(uint8_t opcode);
+    int execute_instruction_with_cycles(uint8_t opcode); // Returns cycles
+    void sync_f_register(); // Sync F register from flags
+    void load_flags_from_f(); // Load flags from F register
 
 private:
     MMU& mmu;
