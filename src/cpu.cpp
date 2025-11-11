@@ -14,22 +14,28 @@ CPU::~CPU() {
 }
 
 void CPU::reset() {
-    AF = 0x01B0;
+    AF = 0x01B0;  // Initial AF: A=0x01, F=0xB0 (Z=1, N=0, H=1, C=0)
     BC = 0x0013;
     DE = 0x00D8;
     HL = 0x014D;
     SP = 0xFFFE;
     PC = 0x0100;
 
-    zero_flag = false;
-    subtract_flag = false;
-    half_carry_flag = false;
-    carry_flag = false;
+    // Load flags from F register (set by AF = 0x01B0)
+    load_flags_from_f();
 
-    ime = true; // Interrupts enabled by default
+    ime = false; // Interrupts DISABLED by default on startup
+    halted = false;
 }
 
-void CPU::step() {
+int CPU::step() {
+    // DEBUG: Track instruction count for debugging test failures
+    static int instruction_count = 0;
+    instruction_count++;
+    if (instruction_count % 10000 == 0 && log_file.is_open()) {
+        log_file << "Instruction count: " << instruction_count << " PC: 0x" << std::hex << PC << std::dec << std::endl;
+    }
+    
     // Check for interrupts
     if (ime) {
         uint8_t ie_reg = mmu.read_byte(0xFFFF); // Interrupt Enable
@@ -37,18 +43,24 @@ void CPU::step() {
 
         uint8_t interrupts = ie_reg & if_reg;
         if (interrupts) {
+            halted = false; // Wake up from HALT
             // Find highest priority interrupt
             for (int i = 0; i < 5; ++i) {
                 if (interrupts & (1 << i)) {
                     handle_interrupt(i);
-                    return; // Don't execute instruction this cycle
+                    return 20; // Interrupt handling takes 20 cycles
                 }
             }
         }
     }
 
+    // If CPU is halted and no interrupts, don't execute instructions
+    if (halted) {
+        return 4; // HALT consumes 4 cycles
+    }
+
     uint8_t opcode = mmu.read_byte(PC++);
-    execute_instruction(opcode);
+    return execute_instruction_with_cycles(opcode);
 }
 
 void CPU::execute_instruction(uint8_t opcode) {
@@ -61,12 +73,19 @@ void CPU::execute_instruction(uint8_t opcode) {
     if (opcode == 0xCB) {
         uint8_t cb_opcode = mmu.read_byte(PC++);
         execute_cb_instruction(cb_opcode);
+        sync_f_register(); // Sync F register after CB instruction
         return;
     }
 
     switch (opcode) {
         case 0x00: // NOP
             // No operation
+            break;
+        
+        case 0x10: // STOP
+            // STOP: Halt CPU and LCD until button press (or other condition)
+            // In test context, just skip the next byte and continue
+            mmu.read_byte(PC++);  // Read and skip the next byte (usually 0x00)
             break;
 
         // 8-bit load instructions
@@ -95,6 +114,18 @@ void CPU::execute_instruction(uint8_t opcode) {
             A = mmu.read_byte(PC++);
             break;
         case 0xE4: // Undefined/illegal opcode, treat as NOP
+            break;
+        case 0xED: // Undefined/illegal opcode, treat as NOP
+            break;
+        case 0xDD: // Undefined/illegal opcode, treat as NOP
+            break;
+        case 0x08: // LD (a16), SP
+            {
+                uint16_t addr = mmu.read_byte(PC) | (mmu.read_byte(PC + 1) << 8);
+                PC += 2;
+                mmu.write_byte(addr, SP & 0xFF);
+                mmu.write_byte(addr + 1, SP >> 8);
+            }
             break;
 
         // LD r1, r2 instructions
@@ -262,8 +293,13 @@ void CPU::execute_instruction(uint8_t opcode) {
             H = mmu.read_byte(PC++);
             break;
         case 0x31: // LD SP, nn
-            SP = mmu.read_byte(PC++);
-            SP |= mmu.read_byte(PC++) << 8;
+            {
+                uint8_t low = mmu.read_byte(PC++);
+                uint8_t high = mmu.read_byte(PC++);
+                SP = low | (high << 8);
+                // Debug: Print SP value
+                //std::cout << "DEBUG: LD SP, nn = 0x" << std::hex << SP << std::dec << std::endl;
+            }
             break;
 
         // ADD HL, rr
@@ -333,12 +369,18 @@ void CPU::execute_instruction(uint8_t opcode) {
             {
                 int8_t offset = (int8_t)mmu.read_byte(PC++);
                 uint16_t result = SP + offset;
+                // LD HL, SP+n: Z=0, N=0, H=carry from bit 3, C=carry from bit 7
                 zero_flag = false;
                 subtract_flag = false;
-                half_carry_flag = ((SP & 0x0F) + (offset & 0x0F)) > 0x0F;
-                carry_flag = ((SP & 0xFF) + (offset & 0xFF)) > 0xFF;
+                // Half-carry: from bit 3 (check 4-bit add)
+                half_carry_flag = ((SP & 0x0F) + ((uint8_t)offset & 0x0F)) > 0x0F;
+                // Carry: from bit 7 (check 8-bit add)
+                carry_flag = ((SP & 0xFF) + ((uint8_t)offset & 0xFF)) > 0xFF;
                 HL = result;
             }
+            break;
+        case 0xF9: // LD SP, HL
+            SP = HL;
             break;
 
         // ADD SP, n
@@ -346,10 +388,13 @@ void CPU::execute_instruction(uint8_t opcode) {
             {
                 int8_t offset = (int8_t)mmu.read_byte(PC++);
                 uint16_t result = SP + offset;
+                // ADD SP, n: Z=0, N=0, H=carry from bit 3, C=carry from bit 7
                 zero_flag = false;
                 subtract_flag = false;
-                half_carry_flag = ((SP & 0x0F) + (offset & 0x0F)) > 0x0F;
-                carry_flag = ((SP & 0xFF) + (offset & 0xFF)) > 0xFF;
+                // Half-carry: from bit 3 (check 4-bit add)
+                half_carry_flag = ((SP & 0x0F) + ((uint8_t)offset & 0x0F)) > 0x0F;
+                // Carry: from bit 7 (check 8-bit add)
+                carry_flag = ((SP & 0xFF) + ((uint8_t)offset & 0xFF)) > 0xFF;
                 SP = result;
             }
             break;
@@ -377,6 +422,10 @@ void CPU::execute_instruction(uint8_t opcode) {
             break;
         case 0x87: // ADD A, A
             add(A);
+            break;
+        // ADD n
+        case 0xC6: // ADD A, n
+            add(mmu.read_byte(PC++));
             break;
 
         // Arithmetic instructions (continued)
@@ -460,6 +509,10 @@ void CPU::execute_instruction(uint8_t opcode) {
         case 0xB7: // OR A, A
             or_op(A);
             break;
+        // OR n
+        case 0xF6: // OR n
+            or_op(mmu.read_byte(PC++));
+            break;
 
         // XOR instructions
         case 0xA8: // XOR A, B
@@ -485,6 +538,9 @@ void CPU::execute_instruction(uint8_t opcode) {
             break;
         case 0xAF: // XOR A, A
             xor_op(A);
+            break;
+        case 0xEE: // XOR A, n
+            xor_op(mmu.read_byte(PC++));
             break;
 
         // ADC instructions (Add with Carry)
@@ -541,6 +597,9 @@ void CPU::execute_instruction(uint8_t opcode) {
             break;
         case 0x9F: // SBC A, A
             sbc(A);
+            break;
+        case 0xDE: // SBC A, n
+            sbc(mmu.read_byte(PC++));
             break;
 
         // Compare instructions
@@ -673,6 +732,7 @@ void CPU::execute_instruction(uint8_t opcode) {
         case 0xF1: // POP AF
             F = mmu.read_byte(SP++);
             A = mmu.read_byte(SP++);
+            load_flags_from_f(); // Load flags from F register
             break;
 
         case 0xC5: // PUSH BC
@@ -691,6 +751,7 @@ void CPU::execute_instruction(uint8_t opcode) {
             mmu.write_byte(SP + 1, H);
             break;
         case 0xF5: // PUSH AF
+            sync_f_register(); // Ensure F is up-to-date before push
             SP -= 2;
             mmu.write_byte(SP, F);
             mmu.write_byte(SP + 1, A);
@@ -819,6 +880,37 @@ void CPU::execute_instruction(uint8_t opcode) {
             rra();
             break;
 
+        // DAA (Decimal Adjust Accumulator)
+        case 0x27: // DAA
+            {
+                uint8_t correction = 0;
+                if (!subtract_flag) {
+                    // After addition/increment
+                    if (carry_flag || A > 0x99) {
+                        correction |= 0x60;
+                    }
+                    if (half_carry_flag || (A & 0x0F) > 0x09) {
+                        correction |= 0x06;
+                    }
+                    A = A + correction;
+                    if (correction & 0x60) {
+                        carry_flag = true;
+                    }
+                } else {
+                    // After subtraction/decrement
+                    if (carry_flag) {
+                        correction |= 0x60;
+                    }
+                    if (half_carry_flag) {
+                        correction |= 0x06;
+                    }
+                    A = A - correction;
+                }
+                zero_flag = (A == 0);
+                half_carry_flag = false;
+            }
+            break;
+
         // CPL (Complement A)
         case 0x2F: // CPL
             A = ~A;
@@ -831,6 +923,7 @@ void CPU::execute_instruction(uint8_t opcode) {
             carry_flag = true;
             subtract_flag = false;
             half_carry_flag = false;
+            // zero_flag 不變
             break;
 
         // CCF (Complement Carry Flag)
@@ -838,11 +931,12 @@ void CPU::execute_instruction(uint8_t opcode) {
             carry_flag = !carry_flag;
             subtract_flag = false;
             half_carry_flag = false;
+            // zero_flag 不變
             break;
 
         // HALT
         case 0x76: // HALT
-            // TODO: Implement HALT (stop CPU until interrupt)
+            halted = true;
             break;
 
         // RST instructions (Restart)
@@ -1032,6 +1126,25 @@ void CPU::execute_instruction(uint8_t opcode) {
             std::cout << "Instruction not implemented yet: 0x" << std::hex << (int)opcode << std::dec << std::endl;
             break;
     }
+    
+    // Sync F register from flags after instruction execution
+    sync_f_register();
+}
+
+void CPU::sync_f_register() {
+    // Update F register from individual flag bits
+    F = (zero_flag ? 0x80 : 0) |
+        (subtract_flag ? 0x40 : 0) |
+        (half_carry_flag ? 0x20 : 0) |
+        (carry_flag ? 0x10 : 0);
+}
+
+void CPU::load_flags_from_f() {
+    // Load individual flags from F register
+    zero_flag = (F & 0x80) != 0;
+    subtract_flag = (F & 0x40) != 0;
+    half_carry_flag = (F & 0x20) != 0;
+    carry_flag = (F & 0x10) != 0;
 }
 
 void CPU::handle_interrupt(uint8_t interrupt_type) {
@@ -1061,20 +1174,20 @@ void CPU::handle_interrupt(uint8_t interrupt_type) {
 
 void CPU::add(uint8_t value) {
     uint16_t result = A + value;
-    zero_flag = (result & 0xFF) == 0;
+    zero_flag = ((result & 0xFF) == 0);
     subtract_flag = false;
-    half_carry_flag = ((A & 0x0F) + (value & 0x0F)) > 0x0F;
+    half_carry_flag = ((A & 0xF) + (value & 0xF)) > 0xF;
     carry_flag = result > 0xFF;
-    A = result & 0xFF;
+    A = static_cast<uint8_t>(result);
 }
 
 void CPU::sub(uint8_t value) {
     uint16_t result = A - value;
-    zero_flag = (result & 0xFF) == 0;
+    zero_flag = ((result & 0xFF) == 0);
     subtract_flag = true;
-    half_carry_flag = (A & 0x0F) < (value & 0x0F);
-    carry_flag = A < value;
-    A = result & 0xFF;
+    half_carry_flag = ((A & 0xF) < (value & 0xF)); // borrow from bit 4
+    carry_flag = (A < value); // borrow from bit 8
+    A = static_cast<uint8_t>(result);
 }
 
 void CPU::and_op(uint8_t value) {
@@ -1102,46 +1215,49 @@ void CPU::xor_op(uint8_t value) {
 }
 
 void CPU::adc(uint8_t value) {
-    uint16_t carry = carry_flag ? 1 : 0;
+    uint8_t carry = carry_flag ? 1 : 0;
     uint16_t result = A + value + carry;
-    zero_flag = (result & 0xFF) == 0;
+    zero_flag = ((result & 0xFF) == 0);
     subtract_flag = false;
-    half_carry_flag = ((A & 0x0F) + (value & 0x0F) + carry) > 0x0F;
+    half_carry_flag = ((A & 0xF) + (value & 0xF) + carry) > 0xF;
     carry_flag = result > 0xFF;
-    A = result & 0xFF;
+    A = static_cast<uint8_t>(result);
 }
 
 void CPU::sbc(uint8_t value) {
-    uint16_t carry = carry_flag ? 1 : 0;
+    uint8_t carry = carry_flag ? 1 : 0;
     uint16_t result = A - value - carry;
-    zero_flag = (result & 0xFF) == 0;
+    zero_flag = ((result & 0xFF) == 0);
     subtract_flag = true;
-    half_carry_flag = (A & 0x0F) < ((value & 0x0F) + carry);
-    carry_flag = A < (value + carry);
-    A = result & 0xFF;
+    half_carry_flag = ((A & 0xF) < ((value & 0xF) + carry)); // borrow from bit 4
+    carry_flag = (A < (value + carry)); // borrow from bit 8
+    A = static_cast<uint8_t>(result);
 }
 
 void CPU::cp(uint8_t value) {
+    // CP A, n: Compare A with n (A - n, but A not modified)
     uint16_t result = A - value;
-    zero_flag = (result & 0xFF) == 0;
+    zero_flag = ((result & 0xFF) == 0);
     subtract_flag = true;
-    half_carry_flag = (A & 0x0F) < (value & 0x0F);
-    carry_flag = A < value;
+    half_carry_flag = ((A & 0xF) < (value & 0xF)); // borrow from bit 4
+    carry_flag = (A < value); // borrow from bit 8
     // A is not modified
 }
 
 void CPU::inc(uint8_t& reg) {
+    uint8_t old = reg;
     reg++;
-    zero_flag = reg == 0;
+    zero_flag = (reg == 0);
     subtract_flag = false;
-    half_carry_flag = (reg & 0x0F) == 0;
+    half_carry_flag = ((old & 0xF) + 1) > 0xF; // set if lower nibble overflows
 }
 
 void CPU::dec(uint8_t& reg) {
+    uint8_t old = reg;
     reg--;
-    zero_flag = reg == 0;
+    zero_flag = (reg == 0);
     subtract_flag = true;
-    half_carry_flag = (reg & 0x0F) == 0x0F;
+    half_carry_flag = ((old & 0xF) == 0); // set if borrow from bit 4
 }
 
 void CPU::rlca() {
@@ -1278,6 +1394,7 @@ void CPU::execute_cb_instruction(uint8_t cb_opcode) {
                     zero_flag = (value & (1 << bit)) == 0;
                     subtract_flag = false;
                     half_carry_flag = true;
+                    // carry_flag remains unchanged
                 } else if (operation >= 16 && operation <= 23) { // RES
                     uint8_t bit = operation - 16;
                     result = value & ~(1 << bit);
@@ -1325,8 +1442,15 @@ uint8_t& CPU::get_register_ref(uint8_t reg_code) {
         case 3: return E;
         case 4: return H;
         case 5: return L;
+        case 6: 
+            // (HL) should be handled separately before calling this function
+            // Return dummy reference to avoid undefined behavior
+            std::cerr << "ERROR: get_register_ref called with reg_code 6 (HL), which should be handled separately!" << std::endl;
+            return A; // Fallback, but this indicates a serious bug
         case 7: return A;
-        default: return A; // Error, but 6 is (HL) handled separately
+        default: 
+            std::cerr << "ERROR: get_register_ref called with invalid reg_code: " << (int)reg_code << std::endl;
+            return A; // Fallback
     }
 }
 
@@ -1397,15 +1521,87 @@ void CPU::srl(uint8_t& reg) {
 }
 
 void CPU::bit(uint8_t bit, uint8_t value) {
+    // BIT n, r: Test bit n in register r
+    // Z = 1 if bit is 0, N = 0, H = 1, C not affected
     zero_flag = (value & (1 << bit)) == 0;
     subtract_flag = false;
     half_carry_flag = true;
+    // carry_flag remains unchanged
 }
 
 void CPU::res(uint8_t bit, uint8_t& reg) {
+    // RES n, r: Reset bit n (clear to 0)
+    // No flags affected
     reg &= ~(1 << bit);
 }
 
 void CPU::set(uint8_t bit, uint8_t& reg) {
+    // SET n, r: Set bit n (set to 1)
+    // No flags affected
     reg |= (1 << bit);
+}
+
+int CPU::execute_instruction_with_cycles(uint8_t opcode) {
+    // Log the instruction
+    if (log_file.is_open()) {
+        log_file << "PC: 0x" << std::hex << (PC - 1) << " Opcode: 0x" << (int)opcode << std::dec << std::endl;
+    }
+
+    int cycles = 4; // Default cycles
+
+    // Handle CB prefix
+    if (opcode == 0xCB) {
+        uint8_t cb_opcode = mmu.read_byte(PC++);
+        execute_cb_instruction(cb_opcode);
+        return 8; // CB instructions take 8 cycles
+    }
+
+    // Set cycles based on instruction
+    switch (opcode) {
+        // 8 cycles
+        case 0x01: case 0x11: case 0x21: case 0x31: // LD rr, nn
+        case 0x06: case 0x0E: case 0x16: case 0x1E: case 0x26: case 0x2E: case 0x36: case 0x3E: // LD r, n
+        case 0x09: case 0x19: case 0x29: case 0x39: // ADD HL, rr
+        case 0x03: case 0x13: case 0x23: case 0x33: // INC rr
+        case 0x0B: case 0x1B: case 0x2B: case 0x3B: // DEC rr
+        case 0xE0: case 0xF0: // LDH
+        case 0xF8: // LD HL, SP+n
+            cycles = 8;
+            break;
+            
+        // 12 cycles
+        case 0xC2: case 0xCA: case 0xD2: case 0xDA: // JP cc, nn
+        case 0xC4: case 0xCC: case 0xD4: case 0xDC: // CALL cc, nn (not taken)
+        case 0xEA: case 0xFA: // LD (nn), A
+        case 0xE8: // ADD SP, n
+            cycles = 12;
+            break;
+            
+        // 16 cycles
+        case 0xC3: // JP nn
+        case 0xC9: // RET
+        case 0xD9: // RETI
+        case 0xC1: case 0xD1: case 0xE1: case 0xF1: // POP rr
+            cycles = 16;
+            break;
+            
+        // 20 cycles
+        case 0xC0: case 0xC8: case 0xD0: case 0xD8: // RET cc (taken)
+            cycles = 20;
+            break;
+            
+        // 24 cycles
+        case 0xCD: // CALL nn
+        case 0xC5: case 0xD5: case 0xE5: case 0xF5: // PUSH rr
+            cycles = 24;
+            break;
+            
+        default:
+            cycles = 4;
+            break;
+    }
+
+    // Execute the instruction
+    execute_instruction(opcode);
+    return cycles;
 }

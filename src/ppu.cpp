@@ -240,11 +240,12 @@ uint8_t PPU::get_tile_pixel(MMU& mmu, uint16_t tile_addr, uint8_t x, uint8_t y) 
 
 uint32_t PPU::get_color(uint8_t color_id, uint8_t palette) const {
     // GameBoy color palette (simplified)
+    // 調亮 GameBoy 綠色調色盤
     static const uint32_t colors[4] = {
-        0xFF9BBC0F, // Light green
-        0xFF8BAC0F, // Light green
-        0xFF306230, // Dark green
-        0xFF0F380F  // Darkest green
+        0xFFFFFFFF, // White (最亮)
+        0xFFB6FFB6, // Very light green
+        0xFF7ED957, // Light green
+        0xFF306230  // Dark green
     };
 
     uint8_t shade = (palette >> (color_id * 2)) & 0x03;

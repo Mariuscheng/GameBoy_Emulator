@@ -1,5 +1,6 @@
 #include "mmu.h"
 #include <iostream>
+#include <fstream>
 
 MMU::MMU() : cartridge_type(0), rom_size_code(0), ram_size_code(0), interrupt_flag(0), interrupt_enable(0) {
     memory.fill(0);
@@ -27,10 +28,11 @@ uint8_t MMU::read_byte(uint16_t address) {
             return 0xFF;
         }
     } else if (address >= IO_REGISTERS_START && address <= IO_REGISTERS_END) {
-        // I/O Registers - handle PPU registers
+        // I/O Registers - handle PPU and APU registers
         switch (address) {
             case 0xFF00: return get_joypad_state(memory[0xFF00]);
             case 0xFF0F: return interrupt_flag;
+            // PPU registers
             case 0xFF40: return ppu.get_lcdc();
             case 0xFF41: return ppu.get_stat();
             case 0xFF42: return ppu.get_scy();
@@ -42,7 +44,8 @@ uint8_t MMU::read_byte(uint16_t address) {
             case 0xFF49: return ppu.get_obp1();
             case 0xFF4A: return ppu.get_wy();
             case 0xFF4B: return ppu.get_wx();
-            default: return memory[address];
+            // APU registers
+            default: return apu.read_register(address);
         }
     } else if (address == 0xFFFF) {
         return interrupt_enable;
@@ -58,10 +61,37 @@ void MMU::write_byte(uint16_t address, uint8_t value) {
         // ROM is read-only, ignore writes
         return;
     } else if (address >= IO_REGISTERS_START && address <= IO_REGISTERS_END) {
-        // I/O Registers - handle PPU registers
+        // I/O Registers - handle PPU and APU registers
         switch (address) {
             case 0xFF00: memory[0xFF00]=value; break; // Store select bits
+            case 0xFF01: memory[0xFF01] = value; break; // Serial transfer data
+            case 0xFF02: 
+                memory[0xFF02] = value; 
+                // Handle serial transfer start (bit 7 set)
+                if (value & 0x80) {
+                    static std::string serial_buffer;
+                    char c = static_cast<char>(memory[0xFF01]);
+                    if (c >= 32 || c == '\n' || c == '\r') {
+                        std::cout << c << std::flush;
+                        static std::ofstream serial_log("serial_output.txt", std::ios::app);
+                        serial_log << c << std::flush;
+                        serial_buffer += c;
+                        // 若偵測到 "End" 字串，則強制結束程式
+                        if (serial_buffer.size() >= 3 && serial_buffer.substr(serial_buffer.size()-3) == "End") {
+                            std::cout << "\n[Emulator auto-exit: detected test end marker]\n" << std::endl;
+                            serial_log << "\n[Emulator auto-exit: detected test end marker]\n" << std::endl;
+                            serial_log.close();
+                            std::exit(0);
+                        }
+                        // 避免 buffer 無限增長
+                        if (serial_buffer.size() > 32) serial_buffer.erase(0, serial_buffer.size()-8);
+                    }
+                    // Trigger serial interrupt
+                    interrupt_flag |= 0x08;
+                }
+                break;
             case 0xFF0F: interrupt_flag = value; break;
+            // PPU registers
             case 0xFF40: ppu.set_lcdc(value); break;
             case 0xFF41: ppu.set_stat(value); break;
             case 0xFF42: ppu.set_scy(value); break;
@@ -73,7 +103,8 @@ void MMU::write_byte(uint16_t address, uint8_t value) {
             case 0xFF49: ppu.set_obp1(value); break;
             case 0xFF4A: ppu.set_wy(value); break;
             case 0xFF4B: ppu.set_wx(value); break;
-            default: memory[address] = value; break;
+            // APU registers
+            default: apu.write_register(address, value); break;
         }
         return;
     } else if (address == 0xFFFF) {

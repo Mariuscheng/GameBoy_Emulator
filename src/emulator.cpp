@@ -2,7 +2,7 @@
 #include <iostream>
 #include <fstream>
 
-Emulator::Emulator() : cpu(mmu), window(nullptr), renderer(nullptr), texture(nullptr), running(false) {
+Emulator::Emulator() : cpu(mmu), window(nullptr), renderer(nullptr), texture(nullptr), audio_stream(nullptr), running(false) {
 }
 
 Emulator::~Emulator() {
@@ -11,9 +11,9 @@ Emulator::~Emulator() {
 
 bool Emulator::initialize() {
     // Initialize SDL
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         std::cout << "SDL_Init Error: " << SDL_GetError() << std::endl;
-        return false; // ���n�i�J headless�A��������
+        return false;
     }
     std::cout << "SDL initialized successfully" << std::endl;
 
@@ -45,8 +45,13 @@ bool Emulator::initialize() {
         return false;
     }
 
+    // Audio initialization (placeholder for now)
+    audio_stream = nullptr;
+    std::cout << "Audio not yet implemented (APU logic is ready)" << std::endl;
+
     // Initialize CPU and MMU
     cpu.reset();
+    mmu.write_byte(0xFFFF, 0x1F); // Enable all interrupts (VBlank, LCD, Timer, Serial, Joypad)
 
     running = true;
     return true;
@@ -107,16 +112,19 @@ void Emulator::run() {
             SDL_Delay(16); // ~60 FPS
         }
 
-        // Execute CPU instructions and update PPU
-        for (int i = 0; i < 1000; ++i) {
-            cpu.step();
-            mmu.get_ppu().step(4, mmu); // 4 cycles per instruction (simplified)
+        // Execute CPU instructions and update PPU and APU
+        int total_cycles = 0;
+        while (total_cycles < 70224) { // ~60 FPS worth of cycles (4.194304 MHz / 60)
+            int cycles = cpu.step();
+            total_cycles += cycles;
+            mmu.get_ppu().step(cycles, mmu);
+            mmu.get_apu().step(cycles);
         }
 
         // Exit after some time in headless mode
         if (!window) {
             static int counter = 0;
-            if (++counter > 100) { // Run for about 100 frames
+            if (++counter > 20000) { // Run for about 20000 frames (~5-6 minutes for test ROMs)
                 running = false;
             }
         }
