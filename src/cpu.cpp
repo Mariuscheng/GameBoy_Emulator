@@ -26,16 +26,10 @@ void CPU::reset() {
 
     ime = false; // Interrupts DISABLED by default on startup
     halted = false;
+    ei_delay_pending = false; // No EI delay pending on reset
 }
 
 int CPU::step() {
-    // DEBUG: Track instruction count for debugging test failures
-    static int instruction_count = 0;
-    instruction_count++;
-    if (instruction_count % 10000 == 0 && log_file.is_open()) {
-        log_file << "Instruction count: " << instruction_count << " PC: 0x" << std::hex << PC << std::dec << std::endl;
-    }
-    
     // Check for interrupts
     if (ime) {
         uint8_t ie_reg = mmu.read_byte(0xFFFF); // Interrupt Enable
@@ -48,6 +42,8 @@ int CPU::step() {
             for (int i = 0; i < 5; ++i) {
                 if (interrupts & (1 << i)) {
                     handle_interrupt(i);
+                    // Update timer with interrupt handling cycles
+                    mmu.update_timer_cycles(20);
                     return 20; // Interrupt handling takes 20 cycles
                 }
             }
@@ -56,18 +52,29 @@ int CPU::step() {
 
     // If CPU is halted and no interrupts, don't execute instructions
     if (halted) {
+        // Update timer even in HALT mode
+        mmu.update_timer_cycles(4);
         return 4; // HALT consumes 4 cycles
     }
 
     uint8_t opcode = mmu.read_byte(PC++);
-    return execute_instruction_with_cycles(opcode);
+    int cycles = execute_instruction_with_cycles(opcode);
+
+    // Update timer based on instruction cycles
+    mmu.update_timer_cycles(static_cast<uint8_t>(cycles));
+
+    // Apply EI delay - EI takes effect after the next instruction executes
+    if (ei_delay_pending) {
+        ime = true;
+        ei_delay_pending = false;
+    }
+
+    return cycles;
 }
 
 void CPU::execute_instruction(uint8_t opcode) {
-    // Log the instruction
-    if (log_file.is_open()) {
-        log_file << "PC: 0x" << std::hex << (PC - 1) << " Opcode: 0x" << (int)opcode << std::dec << std::endl;
-    }
+    // Logging is done in execute_instruction_with_cycles, not here
+    // to avoid duplicate logging
 
     // Handle CB prefix
     if (opcode == 0xCB) {
@@ -367,16 +374,24 @@ void CPU::execute_instruction(uint8_t opcode) {
         // LD HL, SP+n
         case 0xF8: // LD HL, SP+n
             {
-                int8_t offset = (int8_t)mmu.read_byte(PC++);
-                uint16_t result = SP + offset;
-                // LD HL, SP+n: Z=0, N=0, H=carry from bit 3, C=carry from bit 7
+                int8_t e = (int8_t)mmu.read_byte(PC++);
+                uint16_t sp = SP;
+                uint16_t result = sp + e;
+                if (log_file.is_open()) {
+                    log_file << "LD HL,SP+e: SP=0x" << std::hex << sp
+                             << " e=" << std::dec << (int)e
+                             << " result=0x" << std::hex << result << std::dec << std::endl;
+                }
+                // Flags: Z=0, N=0, H from bit3 carry, C from bit7 carry of low-byte add (SP low + e)
                 zero_flag = false;
                 subtract_flag = false;
-                // Half-carry: from bit 3 (check 4-bit add)
-                half_carry_flag = ((SP & 0x0F) + ((uint8_t)offset & 0x0F)) > 0x0F;
-                // Carry: from bit 7 (check 8-bit add)
-                carry_flag = ((SP & 0xFF) + ((uint8_t)offset & 0xFF)) > 0xFF;
+                half_carry_flag = ((sp & 0x0F) + ((uint8_t)e & 0x0F)) > 0x0F;
+                carry_flag      = ((sp & 0xFF) + (uint8_t)e) > 0xFF;
                 HL = result;
+                if (log_file.is_open()) {
+                    log_file << "    Flags: Z=" << zero_flag << " N=" << subtract_flag
+                             << " H=" << half_carry_flag << " C=" << carry_flag << std::endl;
+                }
             }
             break;
         case 0xF9: // LD SP, HL
@@ -386,16 +401,24 @@ void CPU::execute_instruction(uint8_t opcode) {
         // ADD SP, n
         case 0xE8: // ADD SP, n
             {
-                int8_t offset = (int8_t)mmu.read_byte(PC++);
-                uint16_t result = SP + offset;
-                // ADD SP, n: Z=0, N=0, H=carry from bit 3, C=carry from bit 7
+                int8_t e = (int8_t)mmu.read_byte(PC++);
+                uint16_t sp = SP;
+                uint16_t result = sp + e;
+                if (log_file.is_open()) {
+                    log_file << "ADD SP,e: SP=0x" << std::hex << sp
+                             << " e=" << std::dec << (int)e
+                             << " result=0x" << std::hex << result << std::dec << std::endl;
+                }
+                // Flags: Z=0, N=0, H from bit3 carry, C from bit7 carry of low-byte add (SP low + e)
                 zero_flag = false;
                 subtract_flag = false;
-                // Half-carry: from bit 3 (check 4-bit add)
-                half_carry_flag = ((SP & 0x0F) + ((uint8_t)offset & 0x0F)) > 0x0F;
-                // Carry: from bit 7 (check 8-bit add)
-                carry_flag = ((SP & 0xFF) + ((uint8_t)offset & 0xFF)) > 0xFF;
+                half_carry_flag = ((sp & 0x0F) + ((uint8_t)e & 0x0F)) > 0x0F;
+                carry_flag      = ((sp & 0xFF) + (uint8_t)e) > 0xFF;
                 SP = result;
+                if (log_file.is_open()) {
+                    log_file << "    Flags: Z=" << zero_flag << " N=" << subtract_flag
+                             << " H=" << half_carry_flag << " C=" << carry_flag << std::endl;
+                }
             }
             break;
         // Arithmetic instructions
@@ -455,7 +478,18 @@ void CPU::execute_instruction(uint8_t opcode) {
             break;
         // SUB n
         case 0xD6: // SUB n
-            sub(mmu.read_byte(PC++));
+            {
+                uint8_t imm = mmu.read_byte(PC++);
+                uint8_t a_before = A;
+                sub(imm);
+                if (log_file.is_open()) {
+                    log_file << "SUB A,n: A=0x" << std::hex << (int)a_before
+                             << " n=0x" << (int)imm
+                             << " -> A'=0x" << (int)A << std::dec
+                             << " | Flags Z=" << zero_flag << " N=" << subtract_flag
+                             << " H=" << half_carry_flag << " C=" << carry_flag << std::endl;
+                }
+            }
             break;
 
         // Logical instructions
@@ -570,7 +604,20 @@ void CPU::execute_instruction(uint8_t opcode) {
             break;
         // ADC n
         case 0xCE: // ADC A, n
-            adc(mmu.read_byte(PC++));
+            {
+                uint8_t imm = mmu.read_byte(PC++);
+                uint8_t a_before = A;
+                bool c_before = carry_flag;
+                adc(imm);
+                if (log_file.is_open()) {
+                    log_file << "ADC A,n: A=0x" << std::hex << (int)a_before
+                             << " n=0x" << (int)imm
+                             << " C_in=" << (c_before?1:0)
+                             << " -> A'=0x" << (int)A << std::dec
+                             << " | Flags Z=" << zero_flag << " N=" << subtract_flag
+                             << " H=" << half_carry_flag << " C=" << carry_flag << std::endl;
+                }
+            }
             break;
 
         // SBC instructions (Subtract with Carry)
@@ -805,31 +852,55 @@ void CPU::execute_instruction(uint8_t opcode) {
             PC += (int8_t)mmu.read_byte(PC++);
             break;
         case 0x20: // JR NZ, n
-            if (!zero_flag) {
-                PC += (int8_t)mmu.read_byte(PC++);
-            } else {
-                PC++;
+            {
+                int8_t off = (int8_t)mmu.read_byte(PC++);
+                uint16_t pc_before = PC;
+                bool take = !zero_flag;
+                if (take) PC += off; else {/* not taken */}
+                if (log_file.is_open()) {
+                    log_file << "JR NZ, n: Z=" << zero_flag << " off=" << (int)off
+                             << (take?" TAKEN":" SKIP")
+                             << " PC: 0x" << std::hex << pc_before << " -> 0x" << PC << std::dec << std::endl;
+                }
             }
             break;
         case 0x28: // JR Z, n
-            if (zero_flag) {
-                PC += (int8_t)mmu.read_byte(PC++);
-            } else {
-                PC++;
+            {
+                int8_t off = (int8_t)mmu.read_byte(PC++);
+                uint16_t pc_before = PC;
+                bool take = zero_flag;
+                if (take) PC += off; else {/* not taken */}
+                if (log_file.is_open()) {
+                    log_file << "JR Z, n: Z=" << zero_flag << " off=" << (int)off
+                             << (take?" TAKEN":" SKIP")
+                             << " PC: 0x" << std::hex << pc_before << " -> 0x" << PC << std::dec << std::endl;
+                }
             }
             break;
         case 0x30: // JR NC, n
-            if (!carry_flag) {
-                PC += (int8_t)mmu.read_byte(PC++);
-            } else {
-                PC++;
+            {
+                int8_t off = (int8_t)mmu.read_byte(PC++);
+                uint16_t pc_before = PC;
+                bool take = !carry_flag;
+                if (take) PC += off; else {/* not taken */}
+                if (log_file.is_open()) {
+                    log_file << "JR NC, n: C=" << carry_flag << " off=" << (int)off
+                             << (take?" TAKEN":" SKIP")
+                             << " PC: 0x" << std::hex << pc_before << " -> 0x" << PC << std::dec << std::endl;
+                }
             }
             break;
         case 0x38: // JR C, n
-            if (carry_flag) {
-                PC += (int8_t)mmu.read_byte(PC++);
-            } else {
-                PC++;
+            {
+                int8_t off = (int8_t)mmu.read_byte(PC++);
+                uint16_t pc_before = PC;
+                bool take = carry_flag;
+                if (take) PC += off; else {/* not taken */}
+                if (log_file.is_open()) {
+                    log_file << "JR C, n: C=" << carry_flag << " off=" << (int)off
+                             << (take?" TAKEN":" SKIP")
+                             << " PC: 0x" << std::hex << pc_before << " -> 0x" << PC << std::dec << std::endl;
+                }
             }
             break;
 
@@ -837,8 +908,8 @@ void CPU::execute_instruction(uint8_t opcode) {
         case 0xF3: // DI (Disable Interrupts)
             ime = false;
             break;
-        case 0xFB: // EI (Enable Interrupts)
-            ime = true;
+        case 0xFB: // EI (Enable Interrupts) - takes effect after next instruction
+            ei_delay_pending = true;
             break;
 
         // Return from interrupt
@@ -934,9 +1005,19 @@ void CPU::execute_instruction(uint8_t opcode) {
             // zero_flag 不變
             break;
 
-        // HALT
+        // HALT - with HALT bug implementation
         case 0x76: // HALT
             halted = true;
+            // HALT bug: If IME is disabled but interrupts are pending,
+            // CPU wakes up but PC is not incremented (stays at HALT instruction)
+            if (!ime) {
+                uint8_t ie_reg = mmu.read_byte(0xFFFF); // Interrupt Enable
+                uint8_t if_reg = mmu.read_byte(0xFF0F); // Interrupt Flag
+                if (ie_reg & if_reg) {
+                    // HALT bug: PC stays at HALT instruction, don't increment PC
+                    PC--; // Undo the PC++ from step() method
+                }
+            }
             break;
 
         // RST instructions (Restart)
@@ -1129,423 +1210,21 @@ void CPU::execute_instruction(uint8_t opcode) {
     
     // Sync F register from flags after instruction execution
     sync_f_register();
-}
-
-void CPU::sync_f_register() {
-    // Update F register from individual flag bits
-    F = (zero_flag ? 0x80 : 0) |
-        (subtract_flag ? 0x40 : 0) |
-        (half_carry_flag ? 0x20 : 0) |
-        (carry_flag ? 0x10 : 0);
-}
-
-void CPU::load_flags_from_f() {
-    // Load individual flags from F register
-    zero_flag = (F & 0x80) != 0;
-    subtract_flag = (F & 0x40) != 0;
-    half_carry_flag = (F & 0x20) != 0;
-    carry_flag = (F & 0x10) != 0;
-}
-
-void CPU::handle_interrupt(uint8_t interrupt_type) {
-    if (!ime) return;
-
-    ime = false; // Disable interrupts
-
-    // Push PC to stack
-    SP -= 2;
-    mmu.write_byte(SP, PC & 0xFF);
-    mmu.write_byte(SP + 1, PC >> 8);
-
-    // Jump to interrupt vector
-    switch (interrupt_type) {
-        case 0: PC = 0x40; break; // VBlank
-        case 1: PC = 0x48; break; // LCD
-        case 2: PC = 0x50; break; // Timer
-        case 3: PC = 0x58; break; // Serial
-        case 4: PC = 0x60; break; // Joypad
+    
+    // Log register state after instruction execution (for suspicious PC ranges)
+    if (log_file.is_open() && (
+        (PC >= 0xc000 && PC <= 0xc030) ||
+        (PC >= 0x210 && PC <= 0x230)
+    )) {
+        log_file << "  State: A=0x" << std::hex << (int)A << " BC=0x" << BC
+                 << " DE=0x" << DE << " HL=0x" << HL << " SP=0x" << SP
+                 << " | Flags Z=" << std::dec << (zero_flag?1:0)
+                 << " N=" << (subtract_flag?1:0) << " H=" << (half_carry_flag?1:0)
+                 << " C=" << (carry_flag?1:0) << std::endl;
     }
-
-    // Clear interrupt flag
-    uint8_t if_reg = mmu.read_byte(0xFF0F);
-    if_reg &= ~(1 << interrupt_type);
-    mmu.write_byte(0xFF0F, if_reg);
-}
-
-void CPU::add(uint8_t value) {
-    uint16_t result = A + value;
-    zero_flag = ((result & 0xFF) == 0);
-    subtract_flag = false;
-    half_carry_flag = ((A & 0xF) + (value & 0xF)) > 0xF;
-    carry_flag = result > 0xFF;
-    A = static_cast<uint8_t>(result);
-}
-
-void CPU::sub(uint8_t value) {
-    uint16_t result = A - value;
-    zero_flag = ((result & 0xFF) == 0);
-    subtract_flag = true;
-    half_carry_flag = ((A & 0xF) < (value & 0xF)); // borrow from bit 4
-    carry_flag = (A < value); // borrow from bit 8
-    A = static_cast<uint8_t>(result);
-}
-
-void CPU::and_op(uint8_t value) {
-    A &= value;
-    zero_flag = A == 0;
-    subtract_flag = false;
-    half_carry_flag = true;
-    carry_flag = false;
-}
-
-void CPU::or_op(uint8_t value) {
-    A |= value;
-    zero_flag = A == 0;
-    subtract_flag = false;
-    half_carry_flag = false;
-    carry_flag = false;
-}
-
-void CPU::xor_op(uint8_t value) {
-    A ^= value;
-    zero_flag = A == 0;
-    subtract_flag = false;
-    half_carry_flag = false;
-    carry_flag = false;
-}
-
-void CPU::adc(uint8_t value) {
-    uint8_t carry = carry_flag ? 1 : 0;
-    uint16_t result = A + value + carry;
-    zero_flag = ((result & 0xFF) == 0);
-    subtract_flag = false;
-    half_carry_flag = ((A & 0xF) + (value & 0xF) + carry) > 0xF;
-    carry_flag = result > 0xFF;
-    A = static_cast<uint8_t>(result);
-}
-
-void CPU::sbc(uint8_t value) {
-    uint8_t carry = carry_flag ? 1 : 0;
-    uint16_t result = A - value - carry;
-    zero_flag = ((result & 0xFF) == 0);
-    subtract_flag = true;
-    half_carry_flag = ((A & 0xF) < ((value & 0xF) + carry)); // borrow from bit 4
-    carry_flag = (A < (value + carry)); // borrow from bit 8
-    A = static_cast<uint8_t>(result);
-}
-
-void CPU::cp(uint8_t value) {
-    // CP A, n: Compare A with n (A - n, but A not modified)
-    uint16_t result = A - value;
-    zero_flag = ((result & 0xFF) == 0);
-    subtract_flag = true;
-    half_carry_flag = ((A & 0xF) < (value & 0xF)); // borrow from bit 4
-    carry_flag = (A < value); // borrow from bit 8
-    // A is not modified
-}
-
-void CPU::inc(uint8_t& reg) {
-    uint8_t old = reg;
-    reg++;
-    zero_flag = (reg == 0);
-    subtract_flag = false;
-    half_carry_flag = ((old & 0xF) + 1) > 0xF; // set if lower nibble overflows
-}
-
-void CPU::dec(uint8_t& reg) {
-    uint8_t old = reg;
-    reg--;
-    zero_flag = (reg == 0);
-    subtract_flag = true;
-    half_carry_flag = ((old & 0xF) == 0); // set if borrow from bit 4
-}
-
-void CPU::rlca() {
-    carry_flag = (A & 0x80) != 0;
-    A = (A << 1) | (carry_flag ? 1 : 0);
-    zero_flag = false;
-    subtract_flag = false;
-    half_carry_flag = false;
-}
-
-void CPU::rrca() {
-    carry_flag = (A & 0x01) != 0;
-    A = (A >> 1) | (carry_flag ? 0x80 : 0);
-    zero_flag = false;
-    subtract_flag = false;
-    half_carry_flag = false;
-}
-
-void CPU::rla() {
-    bool old_carry = carry_flag;
-    carry_flag = (A & 0x80) != 0;
-    A = (A << 1) | (old_carry ? 1 : 0);
-    zero_flag = false;
-    subtract_flag = false;
-    half_carry_flag = false;
-}
-
-void CPU::rra() {
-    bool old_carry = carry_flag;
-    carry_flag = (A & 0x01) != 0;
-    A = (A >> 1) | (old_carry ? 0x80 : 0);
-    zero_flag = false;
-    subtract_flag = false;
-    half_carry_flag = false;
-}
-
-void CPU::rst(uint8_t addr) {
-    SP -= 2;
-    mmu.write_byte(SP, PC & 0xFF);
-    mmu.write_byte(SP + 1, PC >> 8);
-    PC = addr;
-}
-
-void CPU::add_hl(uint16_t value) {
-    uint32_t result = HL + value;
-    subtract_flag = false;
-    half_carry_flag = ((HL & 0x0FFF) + (value & 0x0FFF)) > 0x0FFF;
-    carry_flag = result > 0xFFFF;
-    HL = result & 0xFFFF;
-}
-
-void CPU::execute_cb_instruction(uint8_t cb_opcode) {
-    uint8_t reg_code = cb_opcode & 0x07;
-    uint8_t operation = cb_opcode >> 3;
-
-    if (reg_code == 6) { // (HL)
-        uint8_t value = mmu.read_byte(HL);
-        uint8_t result;
-
-        switch (operation) {
-            case 0: // RLC (HL)
-                carry_flag = (value & 0x80) != 0;
-                result = (value << 1) | (carry_flag ? 1 : 0);
-                zero_flag = result == 0;
-                subtract_flag = false;
-                half_carry_flag = false;
-                mmu.write_byte(HL, result);
-                break;
-            case 1: // RRC (HL)
-                carry_flag = (value & 0x01) != 0;
-                result = (value >> 1) | (carry_flag ? 0x80 : 0);
-                zero_flag = result == 0;
-                subtract_flag = false;
-                half_carry_flag = false;
-                mmu.write_byte(HL, result);
-                break;
-            case 2: // RL (HL)
-                {
-                    bool old_carry = carry_flag;
-                    carry_flag = (value & 0x80) != 0;
-                    result = (value << 1) | (old_carry ? 1 : 0);
-                    zero_flag = result == 0;
-                    subtract_flag = false;
-                    half_carry_flag = false;
-                    mmu.write_byte(HL, result);
-                }
-                break;
-            case 3: // RR (HL)
-                {
-                    bool old_carry = carry_flag;
-                    carry_flag = (value & 0x01) != 0;
-                    result = (value >> 1) | (old_carry ? 0x80 : 0);
-                    zero_flag = result == 0;
-                    subtract_flag = false;
-                    half_carry_flag = false;
-                    mmu.write_byte(HL, result);
-                }
-                break;
-            case 4: // SLA (HL)
-                carry_flag = (value & 0x80) != 0;
-                result = value << 1;
-                zero_flag = result == 0;
-                subtract_flag = false;
-                half_carry_flag = false;
-                mmu.write_byte(HL, result);
-                break;
-            case 5: // SRA (HL)
-                carry_flag = (value & 0x01) != 0;
-                result = (value >> 1) | (value & 0x80);
-                zero_flag = result == 0;
-                subtract_flag = false;
-                half_carry_flag = false;
-                mmu.write_byte(HL, result);
-                break;
-            case 6: // SWAP (HL)
-                result = ((value & 0x0F) << 4) | ((value & 0xF0) >> 4);
-                zero_flag = result == 0;
-                subtract_flag = false;
-                half_carry_flag = false;
-                carry_flag = false;
-                mmu.write_byte(HL, result);
-                break;
-            case 7: // SRL (HL)
-                carry_flag = (value & 0x01) != 0;
-                result = value >> 1;
-                zero_flag = result == 0;
-                subtract_flag = false;
-                half_carry_flag = false;
-                mmu.write_byte(HL, result);
-                break;
-            default:
-                if (operation >= 8 && operation <= 15) { // BIT
-                    uint8_t bit = operation - 8;
-                    zero_flag = (value & (1 << bit)) == 0;
-                    subtract_flag = false;
-                    half_carry_flag = true;
-                    // carry_flag remains unchanged
-                } else if (operation >= 16 && operation <= 23) { // RES
-                    uint8_t bit = operation - 16;
-                    result = value & ~(1 << bit);
-                    mmu.write_byte(HL, result);
-                } else if (operation >= 24 && operation <= 31) { // SET
-                    uint8_t bit = operation - 24;
-                    result = value | (1 << bit);
-                    mmu.write_byte(HL, result);
-                }
-                break;
-        }
-    } else { // Regular registers
-        uint8_t& reg = get_register_ref(reg_code);
-
-        switch (operation) {
-            case 0: rlc(reg); break;
-            case 1: rrc(reg); break;
-            case 2: rl(reg); break;
-            case 3: rr(reg); break;
-            case 4: sla(reg); break;
-            case 5: sra(reg); break;
-            case 6: swap(reg); break;
-            case 7: srl(reg); break;
-            default:
-                if (operation >= 8 && operation <= 15) { // BIT
-                    uint8_t bit_val = operation - 8;
-                    bit(bit_val, reg);
-                } else if (operation >= 16 && operation <= 23) { // RES
-                    uint8_t bit_val = operation - 16;
-                    res(bit_val, reg);
-                } else if (operation >= 24 && operation <= 31) { // SET
-                    uint8_t bit_val = operation - 24;
-                    set(bit_val, reg);
-                }
-                break;
-        }
-    }
-}
-
-uint8_t& CPU::get_register_ref(uint8_t reg_code) {
-    switch (reg_code) {
-        case 0: return B;
-        case 1: return C;
-        case 2: return D;
-        case 3: return E;
-        case 4: return H;
-        case 5: return L;
-        case 6: 
-            // (HL) should be handled separately before calling this function
-            // Return dummy reference to avoid undefined behavior
-            std::cerr << "ERROR: get_register_ref called with reg_code 6 (HL), which should be handled separately!" << std::endl;
-            return A; // Fallback, but this indicates a serious bug
-        case 7: return A;
-        default: 
-            std::cerr << "ERROR: get_register_ref called with invalid reg_code: " << (int)reg_code << std::endl;
-            return A; // Fallback
-    }
-}
-
-void CPU::rlc(uint8_t& reg) {
-    carry_flag = (reg & 0x80) != 0;
-    reg = (reg << 1) | (carry_flag ? 1 : 0);
-    zero_flag = reg == 0;
-    subtract_flag = false;
-    half_carry_flag = false;
-}
-
-void CPU::rrc(uint8_t& reg) {
-    carry_flag = (reg & 0x01) != 0;
-    reg = (reg >> 1) | (carry_flag ? 0x80 : 0);
-    zero_flag = reg == 0;
-    subtract_flag = false;
-    half_carry_flag = false;
-}
-
-void CPU::rl(uint8_t& reg) {
-    bool old_carry = carry_flag;
-    carry_flag = (reg & 0x80) != 0;
-    reg = (reg << 1) | (old_carry ? 1 : 0);
-    zero_flag = reg == 0;
-    subtract_flag = false;
-    half_carry_flag = false;
-}
-
-void CPU::rr(uint8_t& reg) {
-    bool old_carry = carry_flag;
-    carry_flag = (reg & 0x01) != 0;
-    reg = (reg >> 1) | (old_carry ? 0x80 : 0);
-    zero_flag = reg == 0;
-    subtract_flag = false;
-    half_carry_flag = false;
-}
-
-void CPU::sla(uint8_t& reg) {
-    carry_flag = (reg & 0x80) != 0;
-    reg <<= 1;
-    zero_flag = reg == 0;
-    subtract_flag = false;
-    half_carry_flag = false;
-}
-
-void CPU::sra(uint8_t& reg) {
-    carry_flag = (reg & 0x01) != 0;
-    reg = (reg >> 1) | (reg & 0x80);
-    zero_flag = reg == 0;
-    subtract_flag = false;
-    half_carry_flag = false;
-}
-
-void CPU::swap(uint8_t& reg) {
-    reg = ((reg & 0x0F) << 4) | ((reg & 0xF0) >> 4);
-    zero_flag = reg == 0;
-    subtract_flag = false;
-    half_carry_flag = false;
-    carry_flag = false;
-}
-
-void CPU::srl(uint8_t& reg) {
-    carry_flag = (reg & 0x01) != 0;
-    reg >>= 1;
-    zero_flag = reg == 0;
-    subtract_flag = false;
-    half_carry_flag = false;
-}
-
-void CPU::bit(uint8_t bit, uint8_t value) {
-    // BIT n, r: Test bit n in register r
-    // Z = 1 if bit is 0, N = 0, H = 1, C not affected
-    zero_flag = (value & (1 << bit)) == 0;
-    subtract_flag = false;
-    half_carry_flag = true;
-    // carry_flag remains unchanged
-}
-
-void CPU::res(uint8_t bit, uint8_t& reg) {
-    // RES n, r: Reset bit n (clear to 0)
-    // No flags affected
-    reg &= ~(1 << bit);
-}
-
-void CPU::set(uint8_t bit, uint8_t& reg) {
-    // SET n, r: Set bit n (set to 1)
-    // No flags affected
-    reg |= (1 << bit);
 }
 
 int CPU::execute_instruction_with_cycles(uint8_t opcode) {
-    // Log the instruction
-    if (log_file.is_open()) {
-        log_file << "PC: 0x" << std::hex << (PC - 1) << " Opcode: 0x" << (int)opcode << std::dec << std::endl;
-    }
 
     int cycles = 4; // Default cycles
 
@@ -1556,48 +1235,70 @@ int CPU::execute_instruction_with_cycles(uint8_t opcode) {
         return 8; // CB instructions take 8 cycles
     }
 
-    // Set cycles based on instruction
+    // Set cycles based on instruction (timings per Pan Docs)
+    // NOTE: Conditional instructions have two timings depending on whether the branch is taken.
     switch (opcode) {
-        // 8 cycles
-        case 0x01: case 0x11: case 0x21: case 0x31: // LD rr, nn
-        case 0x06: case 0x0E: case 0x16: case 0x1E: case 0x26: case 0x2E: case 0x36: case 0x3E: // LD r, n
-        case 0x09: case 0x19: case 0x29: case 0x39: // ADD HL, rr
+        // 8 cycles (unconditional)
         case 0x03: case 0x13: case 0x23: case 0x33: // INC rr
-        case 0x0B: case 0x1B: case 0x2B: case 0x3B: // DEC rr
-        case 0xE0: case 0xF0: // LDH
+        case 0x09: case 0x19: case 0x29: case 0x39: // ADD HL, rr
+        case 0xF9: // LD SP, HL
+            cycles = 8; break;
+
+        // 12 cycles (unconditional)
+        case 0x01: case 0x11: case 0x21: case 0x31: // LD rr, nn
+        case 0x06: case 0x0E: case 0x16: case 0x1E: case 0x26: case 0x2E: case 0x36: case 0x3E: // LD r, n / LD (HL), n
+        case 0xE0: case 0xF0: // LDH (n),A / LDH A,(n)
         case 0xF8: // LD HL, SP+n
-            cycles = 8;
-            break;
-            
-        // 12 cycles
-        case 0xC2: case 0xCA: case 0xD2: case 0xDA: // JP cc, nn
-        case 0xC4: case 0xCC: case 0xD4: case 0xDC: // CALL cc, nn (not taken)
-        case 0xEA: case 0xFA: // LD (nn), A
+        case 0xC1: case 0xD1: case 0xE1: case 0xF1: // POP rr
+            cycles = 12; break;
+
+        // 16 cycles (unconditional)
+        case 0xEA: case 0xFA: // LD (nn),A / LD A,(nn)
         case 0xE8: // ADD SP, n
-            cycles = 12;
-            break;
-            
-        // 16 cycles
         case 0xC3: // JP nn
         case 0xC9: // RET
         case 0xD9: // RETI
-        case 0xC1: case 0xD1: case 0xE1: case 0xF1: // POP rr
-            cycles = 16;
-            break;
-            
-        // 20 cycles
-        case 0xC0: case 0xC8: case 0xD0: case 0xD8: // RET cc (taken)
-            cycles = 20;
-            break;
-            
-        // 24 cycles
+        case 0xC7: case 0xCF: case 0xD7: case 0xDF: case 0xE7: case 0xEF: case 0xF7: case 0xFF: // RST t
+            cycles = 16; break;
+
+        // 20 cycles (unconditional)
+        case 0x08: // LD (a16), SP
+            cycles = 20; break;
+
+        // 24 cycles (unconditional)
         case 0xCD: // CALL nn
+            cycles = 24; break;
+
+        // 16-bit PUSH (16 cycles)
         case 0xC5: case 0xD5: case 0xE5: case 0xF5: // PUSH rr
-            cycles = 24;
-            break;
-            
+            cycles = 16; break;
+
+        // Conditional JR (taken 12, not taken 8)
+        case 0x20: cycles = (!zero_flag)  ? 12 : 8; break; // JR NZ,n
+        case 0x28: cycles = ( zero_flag)  ? 12 : 8; break; // JR Z,n
+        case 0x30: cycles = (!carry_flag) ? 12 : 8; break; // JR NC,n
+        case 0x38: cycles = ( carry_flag) ? 12 : 8; break; // JR C,n
+
+        // Conditional JP (taken 16, not taken 12)
+        case 0xC2: cycles = (!zero_flag)  ? 16 : 12; break; // JP NZ,nn
+        case 0xCA: cycles = ( zero_flag)  ? 16 : 12; break; // JP Z,nn
+        case 0xD2: cycles = (!carry_flag) ? 16 : 12; break; // JP NC,nn
+        case 0xDA: cycles = ( carry_flag) ? 16 : 12; break; // JP C,nn
+
+        // Conditional RET (taken 20, not taken 8)
+        case 0xC0: cycles = (!zero_flag)  ? 20 : 8; break; // RET NZ
+        case 0xC8: cycles = ( zero_flag)  ? 20 : 8; break; // RET Z
+        case 0xD0: cycles = (!carry_flag) ? 20 : 8; break; // RET NC
+        case 0xD8: cycles = ( carry_flag) ? 20 : 8; break; // RET C
+
+        // Conditional CALL (taken 24, not taken 12)
+        case 0xC4: cycles = (!zero_flag)  ? 24 : 12; break; // CALL NZ,nn
+        case 0xCC: cycles = ( zero_flag)  ? 24 : 12; break; // CALL Z,nn
+        case 0xD4: cycles = (!carry_flag) ? 24 : 12; break; // CALL NC,nn
+        case 0xDC: cycles = ( carry_flag) ? 24 : 12; break; // CALL C,nn
+
         default:
-            cycles = 4;
+            // All other opcodes keep default 4 cycles here; many multi-cycle opcodes already handled above.
             break;
     }
 

@@ -51,6 +51,9 @@ public:
     // Interrupt master enable
     bool ime;
 
+    // EI instruction delay - EI takes effect after the next instruction
+    bool ei_delay_pending;
+
     // CPU state
     bool halted;
 

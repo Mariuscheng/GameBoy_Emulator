@@ -39,6 +39,10 @@ public:
     void set_joypad_bit(int bit, bool pressed);
     uint8_t get_joypad_state(uint8_t select) const;
 
+    // Timer access and update
+    uint8_t get_timer_control() const { return timer_control; }
+    void update_timer_cycles(uint8_t cycles);
+
 private:
     std::array<uint8_t, 0x10000> memory; // 64KB total
 
@@ -76,12 +80,64 @@ private:
     // APU
     APU apu;
 
+    // MBC (Memory Bank Controller) support
+    enum MBCType {
+        MBC_NONE = 0x00,
+        MBC1 = 0x01,
+        MBC1_RAM = 0x02,
+        MBC1_RAM_BATTERY = 0x03,
+        MBC2 = 0x05,
+        MBC2_BATTERY = 0x06,
+        MBC3 = 0x11,
+        MBC3_RAM = 0x12,
+        MBC3_RAM_BATTERY = 0x13,
+        MBC3_TIMER_BATTERY = 0x0F,
+        MBC3_TIMER_RAM_BATTERY = 0x10,
+        MBC5 = 0x19,
+        MBC5_RAM = 0x1A,
+        MBC5_RAM_BATTERY = 0x1B,
+        MBC5_RUMBLE = 0x1C,
+        MBC5_RUMBLE_SRAM = 0x1D,
+        MBC5_RUMBLE_SRAM_BATTERY = 0x1E
+    };
+
+    MBCType mbc_type;
+    bool mbc_ram_enabled;
+    uint8_t mbc_rom_bank;
+    uint8_t mbc_ram_bank;
+    uint8_t mbc_mode; // MBC1: 0=ROM mode, 1=RAM mode
+
+    // External RAM (for cartridges with RAM)
+    std::vector<uint8_t> external_ram;
+
     // Interrupt registers
-    uint8_t interrupt_flag; // IF (0xFF0F)
-    uint8_t interrupt_enable; // IE (0xFFFF)
+    uint8_t interrupt_flag;
+    uint8_t interrupt_enable;
+
+    // Timer registers
+    uint8_t divider;        // DIV (0xFF04) - internal divider
+    uint8_t timer_counter;  // TIMA (0xFF05) - timer counter
+    uint8_t timer_control;  // TAC (0xFF07) - timer control
+    uint16_t internal_counter; // Internal cycle counter for DIV
+    
+    // Timer overflow delay (4 M-cycles)
+    uint8_t timer_overflow_delay;  // 0 = no overflow pending, >0 = cycles remaining
+    
+    // Timer helper functions
+    void set_tac(uint8_t value);
 
     // Joypad state
-    uint8_t joypad_state = 0xFF; // 8 bits: 0=pressed, 1=released
+    uint8_t joypad_state;
+
+    // MBC helper functions
+    void handle_mbc_write(uint16_t address, uint8_t value);
+    void handle_mbc1_write(uint16_t address, uint8_t value);
+    void handle_mbc2_write(uint16_t address, uint8_t value);
+    void handle_mbc3_write(uint16_t address, uint8_t value);
+    void handle_mbc5_write(uint16_t address, uint8_t value);
+    uint8_t get_mbc_rom_bank(uint16_t address) const;
+    uint8_t get_mbc_ram_bank(uint16_t address) const;
+    uint16_t get_mbc_ram_address(uint16_t address) const;
 };
 
 #endif // MMU_H

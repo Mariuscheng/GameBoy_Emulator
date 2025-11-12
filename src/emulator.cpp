@@ -45,9 +45,26 @@ bool Emulator::initialize() {
         return false;
     }
 
-    // Audio initialization (placeholder for now)
-    audio_stream = nullptr;
-    std::cout << "Audio not yet implemented (APU logic is ready)" << std::endl;
+    // Audio initialization
+    SDL_AudioSpec desired_spec;
+    SDL_zero(desired_spec);
+    desired_spec.freq = 44100;
+    desired_spec.format = SDL_AUDIO_F32;
+    desired_spec.channels = 2;
+
+    audio_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired_spec, nullptr, nullptr);
+    if (!audio_stream) {
+        std::cout << "SDL_OpenAudioDeviceStream Error: " << SDL_GetError() << std::endl;
+        SDL_DestroyTexture(texture);
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return false;
+    }
+
+    // Start audio playback
+    SDL_ResumeAudioDevice(SDL_GetAudioStreamDevice(audio_stream));
+    std::cout << "Audio initialized successfully" << std::endl;
 
     // Initialize CPU and MMU
     cpu.reset();
@@ -114,7 +131,17 @@ void Emulator::run() {
 
         // Execute CPU instructions and update PPU and APU
         int total_cycles = 0;
-        while (total_cycles < 70224) { // ~60 FPS worth of cycles (4.194304 MHz / 60)
+        const int target_cycles = 70224; // ~60 FPS worth of cycles (4.194304 MHz / 60)
+        const int audio_samples_per_frame = 735; // 44100 Hz / 60 FPS ≈ 735 samples per frame
+
+        // Generate audio samples for this frame
+        if (audio_stream) {
+            std::vector<float> audio_buffer(audio_samples_per_frame * 2); // Stereo
+            mmu.get_apu().get_audio_samples(audio_buffer.data(), audio_buffer.size());
+            SDL_PutAudioStreamData(audio_stream, audio_buffer.data(), audio_buffer.size() * sizeof(float));
+        }
+
+        while (total_cycles < target_cycles) {
             int cycles = cpu.step();
             total_cycles += cycles;
             mmu.get_ppu().step(cycles, mmu);
@@ -132,6 +159,10 @@ void Emulator::run() {
 }
 
 void Emulator::shutdown() {
+    if (audio_stream) {
+        SDL_DestroyAudioStream(audio_stream);
+        audio_stream = nullptr;
+    }
     if (texture) {
         SDL_DestroyTexture(texture);
         texture = nullptr;
