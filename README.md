@@ -1,488 +1,148 @@
-# GameBoy Emulator(A.I Project, Not Complete)
-
-This project is a GameBoy emulator written in C++ using SDL3 for graphics, input, and audio handling. The goal is to accurately emulate the original Nintendo GameBoy hardware, allowing users to play classic GameBoy games on modern systems.
-
-## Features
-
-- ✅ Accurate emulation of the GameBoy CPU (LR35902) - All documented opcodes implemented
-- ✅ Graphics rendering using SDL3
-- ✅ Input handling for GameBoy controls
-- ✅ Audio emulation (APU logic implemented)
-- ✅ ROM loading and cartridge support
-- 🔄 Save state functionality (planned)
-- 🔄 Debugging tools (planned)
-
-## Prerequisites
-
-- C++14 compatible compiler (e.g., Visual Studio 2022 or later, GCC, Clang)
-- SDL3 library (installed via vcpkg)
-- CMake (for build system)
-- vcpkg package manager
-
-## Installation
-
-### Installing Dependencies via vcpkg
-
-1. Install vcpkg if not already installed:
-   ```bash
-   git clone https://github.com/Microsoft/vcpkg.git
-   cd vcpkg
-   .\bootstrap-vcpkg.bat  # Windows
-   # or ./bootstrap-vcpkg.sh  # Linux/macOS
-   ```
-
-2. Install SDL3:
-   ```bash
-   vcpkg install sdl3
-   ```
-
-### Installing Additional SDL3 Extensions (Optional)
-
-If you plan to extend the emulator with image, font, or audio features:
-```bash
-vcpkg install sdl3-image sdl3-ttf sdl3-mixer
-```
-
-## Building the Project
-
-### Using CMake (Recommended)
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/GameBoy-Emulator.git
-   cd GameBoy-Emulator
-   ```
-
-2. Configure the project with CMake:
-   ```bash
-   mkdir build
-   cd build
-   cmake .. -DCMAKE_TOOLCHAIN_FILE=C:/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
-   ```
-   Replace `C:/path/to/vcpkg` with your actual vcpkg installation path.
-
-3. Build the project:
-   ```bash
-   cmake --build . --config Debug
-   ```
-
-4. The executables will be created in the `Debug` or `Release` directory.
-
-### Alternative: Using Visual Studio
-
-1. Open the `GameBoy.sln` file in Visual Studio 2022.
-
-2. Ensure vcpkg is integrated with Visual Studio:
-   ```bash
-   vcpkg integrate install
-   ```
-
-3. Set the platform to x64 and configuration to Debug or Release.
-
-4. Build the solution.
-
-5. Copy required DLLs to the output directory:
-   - Copy `SDL3.dll` from `C:\vcpkg\installed\x64-windows\bin\` to `x64\Debug\` or `x64\Release\`.
-   - If using extensions, copy additional DLLs like `SDL3_image.dll`, etc.
-
-## Usage
-
-1. Build the project as described above.
-
-2. Place your GameBoy ROM files in the `roms/` directory (create it if it doesn't exist).
-
-3. Run the emulator with a GameBoy ROM file:
-   ```bash
-   # From build directory
-   .\Debug\GameBoy.exe ..\roms\tetris.gb
-   ```
-   Example:
-   ```bash
-   .\Debug\GameBoy.exe ..\roms\tetris.gb
-   ```
-
-4. The emulator will load the ROM, parse its header, and start emulation.
-
-5. Use the following keyboard controls:
-   - **A Button**: Z
-   - **B Button**: X
-   - **Start**: Enter
-   - **Select**: Right Shift
-   - **D-Pad**: Arrow Keys (Up, Down, Left, Right)
-
-### ROM Analysis Tool
-
-The project also includes a ROM analysis tool:
-
-```bash
-.\Debug\analyze_rom.exe ..\roms\tetris.gb
-```
-
-This tool parses and displays detailed information about GameBoy ROM headers.
-
-### ROM Parsing Details
-
-The emulator supports parsing GameBoy ROM headers to extract important information:
-
-- **Cartridge Type**: Determines MBC (Memory Bank Controller) type
-- **ROM Size**: Total ROM capacity
-- **RAM Size**: External RAM size (if any)
-- **Title**: Game title
-- **Licensee Code**: Publisher information
-- **Destination Code**: Region (Japan/World)
-- **Version Number**: ROM version
-
-Supported cartridge types include:
-- ROM only
-- MBC1, MBC2, MBC3, MBC5
-- With or without RAM
-- With or without battery backup
-
-## GameBoy Execution Flow
-
-The GameBoy emulator follows the original hardware's execution model. Here's how the emulator processes a GameBoy game:
-
-### 1. ROM Loading and Initialization
-- Load the `.gb` ROM file from disk
-- Parse the ROM header to extract metadata (title, cartridge type, memory sizes)
-- Initialize the Memory Management Unit (MMU) with ROM data
-- Set up memory banking based on cartridge type (MBC)
-
-### 2. Hardware Initialization
-- Initialize CPU (LR35902) with correct register values
-- Set up memory map (64KB address space)
-- Initialize Picture Processing Unit (PPU) for graphics
-- Set up Audio Processing Unit (APU) for sound
-- Configure input handling for joypad
-
-### 3. Main Emulation Loop
-The emulator runs in a continuous loop, synchronizing with real-time:
-
-#### CPU Execution
-- Fetch instruction from memory (PC register)
-- Decode and execute instruction
-- Update CPU registers and flags
-- Handle clock cycles (each instruction takes specific cycles)
-
-#### Memory Access
-- CPU reads/writes to memory through MMU
-- MMU handles address translation and banking
-- Special memory regions trigger hardware behavior
-
-#### Interrupt Handling
-- Check for interrupts (VBlank, LCD, Timer, Serial, Joypad)
-- If interrupt enabled and triggered, jump to interrupt handler
-- Update interrupt flags and master enable
-
-#### Graphics Rendering
-- PPU processes scanlines (144 visible + 10 VBlank)
-- Render background, window, and sprites
-- Update LCD status and trigger VBlank interrupt
-- Copy frame buffer to SDL window
-
-#### Audio Generation
-- APU generates 4 channels (2 pulse, 1 wave, 1 noise)
-- Mix audio samples based on current frame
-- Output to SDL audio device
-
-#### Input Processing
-- Poll SDL events for keyboard input
-- Map keys to GameBoy buttons (A, B, Start, Select, D-pad)
-- Update joypad register and trigger interrupts
-
-#### Timing Synchronization
-- Maintain 4.194304 MHz CPU clock
-- Synchronize with 59.73 Hz frame rate
-- Handle frame skipping if running too slow
-
-### 4. Cartridge-Specific Features
-- MBC banking for larger ROMs/RAM
-- Real-time clock (MBC3)
-- Rumble motor control (MBC5)
-- Battery-backed save data
-
-### 5. Debug and Development Features
-- Instruction logging and disassembly
-- Memory viewer and breakpoints
-- Save/load emulator state
-- Performance profiling
-
-This execution flow ensures accurate timing and behavior matching the original GameBoy hardware, allowing games to run correctly with proper graphics, sound, and input response.
-
-## Current Status
-
-The GameBoy emulator is currently in **Phase 6** of development with the following components implemented:
-
-### ✅ Completed Features
-- **Full CPU Emulation**: All 256 LR35902 opcodes implemented
-  - ✅ **CPU test suite (cpu_instrs.gb)**: 10/11 test groups passing
-  - Test 01: ✅ Special instructions - **PASS**
-  - Test 02: ✅ **PASS**
-  - Tests 03-11: ✅ All **PASS**
-  
-- **Memory Management**: 64KB address space with ROM loading and I/O register handling
-  - ✅ Timer registers (DIV, TIMA, TAC) implemented
-  - ✅ Interrupt flag and interrupt enable registers
-  
-- **Timer Emulation** (NEW):
-  - ✅ DIV register (0xFF04) - Internal 16-bit divider (high byte)
-  - ✅ TIMA register (0xFF05) - 8-bit counter with overflow
-  - ✅ TAC register (0xFF07) - Control: frequency select + enable bit
-  - ✅ Four timer frequencies: 1024/16/64/256 M-cycles
-  - ✅ Timer interrupt (IF bit 2) triggering
-  - ✅ TIMA overflow delay (4 M-cycle delay before interrupt)
-  - ✅ Bit-based falling edge detection for accurate timing
-  
-- **Graphics Setup**: SDL3 window and renderer initialized
-- **Input Handling**: Keyboard mapping to GameBoy controls (A, B, Start, Select, D-Pad)
-- **ROM Loading**: Header parsing, cartridge type detection, region detection
-- **PPU Implementation**: Tile-based graphics, sprite rendering, LCD timing (modes 0-3)
-- **APU Implementation**: 4-channel audio synthesis logic (pulse, wave, noise channels)
-- **Build System**: CMake configuration with vcpkg integration
-- **Interrupt System**: Full interrupt handling (VBlank, LCD, Timer, Serial, Joypad)
-
-### 🔄 In Progress / Testing
-- **Timer Test Compatibility**: test 02:04 still failing despite implementation
-  - Possible issues: TIMA internal value delay, edge case in test expectations
-  - May require Game Boy-specific hardware quirks (glitches) for compatibility
-- **Audio Integration**: SDL3 audio output with push model (44.1kHz stereo)
-- **Advanced Cartridge Support**: MBC1/2/3/5 controller implementations
-- **Save States**: Battery-backed RAM and emulator state saving
-  
-### 🎮 Tested Games
-- **Tetris (World)**: Successfully loads and runs (basic ROM-only support)
-- **Test ROMs**: Various CPU and instruction test ROMs analyzed
-
-The emulator now has comprehensive timer support and successfully passes 10 out of 11 test groups in the Blargg CPU instruction test suite.
-
-## Debugging and Analysis
-
-### Test ROM Status
-The emulator's CPU implementation can be tested with various test ROMs:
-
-```bash
-# CPU Instruction Test (all 11 groups)
-.\Debug\GameBoy.exe ..\roms\cpu_instrs.gb
-
-# Other test ROMs
-.\Debug\GameBoy.exe ..\roms\halt_bug.gb
-.\Debug\GameBoy.exe ..\roms\instr_timing.gb
-.\Debug\GameBoy.exe ..\roms\mem_timing_1.gb
-```
-
-### Current Test Results
-- **Test 01** (Special Instructions): ✅ **PASS**
-- **Test 02** (Interrupts & Timer): ⚠️ **MIXED**
-  - Subtests 01-03: ✅ PASS (DI works, EI works, HALT works)
-  - Subtest 04 ("Timer doesn't work"): ❌ **FAIL** (despite timer implementation)
-- **Tests 03-11** (Various instruction groups): ✅ **ALL PASS**
-
-### Timer Implementation Details
-The Game Boy timer system has been fully implemented with the following features:
-- **16-bit internal divider** that continuously increments
-- **DIV register** (0xFF04) returns bits 15-8 of the divider
-- **TIMA register** (0xFF05) increments when a selected bit of the divider changes from 1→0
-- **TAC register** (0xFF07) selects which divider bit triggers TIMA increments
-- **Bit positions by frequency** (TAC bits 0-1):
-  - `00`: bit 9 (slowest, 4096 Hz)
-  - `01`: bit 3 (fastest, 262144 Hz)
-  - `10`: bit 5 (65536 Hz)
-  - `11`: bit 7 (16384 Hz)
-- **TIMA overflow handling**: When TIMA reaches 0xFF and another increment occurs:
-  - TIMA is reset to 0x00
-  - IF register bit 2 is set after 4 M-cycle delay (TIMA delay quirk)
-
-### Known Test Failure Analysis
-**test 02:04 ("Timer doesn't work")** remains unresolved despite full timer implementation:
-- All prerequisite subtests (DI, EI, HALT) pass
-- Other tests that depend on timer functionality pass (03-11)
-- Likely cause: 
-  - May require additional Game Boy hardware quirks
-  - TIMA internal value delay might need more complex implementation
-  - Specific test expectations may differ from standard documentation
-
-For detailed analysis and debugging steps, refer to the test ROM analysis in `DEBUG_NOTES.md`.
-
-### Logging and Debugging
-The emulator generates debug logs:
-- `cpu_log.txt` - Instruction execution log (PC, opcode)
-- `serial_output.txt` - Serial port output from ROM tests
-
-## Project Structure
-
+# GameBoy Emulator (A.I Project)
+
+> 一個用 C++ 與 SDL3 撰寫的 Game Boy (DMG) 模擬器。現已通過 blargg `cpu_instrs` 全部測試，`dmg-acid2` 圖像測試亦已正確顯示。
+
+## 狀態總覽
+| 子系統 | 現況 |
+|--------|------|
+| CPU | 指令集、旗標、EI 延遲、中斷優先順序與服務流程已通過 `cpu_instrs.gb` 全部項目 |
+| PPU | 掃描線/Mode 時序 (456 cycles/line)、背景/視窗/Sprite 渲染皆正常；`dmg-acid2` 已通過（含右下 Window/遮蔽/優先序） |
+| APU | 目前骨架存在，可輸出樣本（尚未與測試 ROM 嚴格比對） |
+| MMU | 寄存器、IF/IE、Timer (DIV/TIMA/TMA/TAC)；已實作 CPU 端 VRAM/OAM 忙碌鎖定，並提供 `ppu_read` 供 PPU 在 Mode2/3 期間合法讀取 |
+| 測試 | blargg `cpu_instrs`：Passed all tests；`dmg-acid2`：Passed |
+
+## 已知待辦 / 未完成
+1. 精細像素 FIFO 與 SCX 捲動延遲、STAT 中斷精準觸發點（acid2 已過，但為提升相容性仍建議實作）。
+2. APU 聲道細節、增益/掃頻/包絡的精準化與測試。
+3. 減少除錯輸出：以 compile-time 或 runtime 旗標控制（避免影響效能）。
+
+## 主要技術特性
+- C++20 (原始 README 標示 C++14，現已升級並使用現代語言特性)。
+- SDL3：顯示與音訊輸出。
+- 精簡 PPU 模式循環：
+	- 每行 456 cycles：0–79 (Mode2 OAM)，80–251 (Mode3 Pixel Transfer)，252–455 (Mode0 HBlank)。
+	- LY 0–143 可視行；144–153 VBlank (Mode1)；154 重設。
+- CPU 中斷：服務 5 M-cycles（2 wait + push PC 高/低 + 跳轉），EI 延遲一指令生效。
+- Sprite：OAM 原始順序選前 10 個；支援 8x16、Flip、背景優先 (color0 透明 + 背景非 0 隱藏 behind_bg)。
+
+## 專案結構
 ```
 GameBoy/
-├── CMakeLists.txt          # CMake build configuration
-├── GameBoy.sln            # Visual Studio solution file
-├── main.cpp               # Entry point with SDL3 initialization
-├── analyze_rom.cpp        # ROM analysis tool
-├── DEBUG_NOTES.md         # Detailed CPU test failure analysis
-├── README.md              # This file
-├── include/               # Header files
-│   ├── cpu.h             # CPU class definition
-│   ├── emulator.h        # Emulator class definition
-│   ├── mmu.h             # Memory Management Unit
-│   ├── ppu.h             # Picture Processing Unit
-│   └── apu.h             # Audio Processing Unit
-├── src/                   # Source files
-│   ├── cpu.cpp           # CPU implementation (all 256 opcodes)
-│   ├── emulator.cpp      # Main emulator loop and initialization
-│   ├── mmu.cpp           # Memory management and I/O registers
-│   ├── ppu.cpp           # Graphics processing and LCD timing
-│   └── apu.cpp           # Audio synthesis (4 channels)
-├── roms/                  # GameBoy ROM files (for testing)
-└── build/                 # Build directory (generated by CMake)
+├── main.cpp              # 入口
+├── analyze_rom.cpp       # ROM 分析工具
+├── include/              # 標頭
+│   ├── cpu.h / mmu.h / ppu.h / apu.h / emulator.h
+├── src/                  # 實作檔
+│   ├── cpu.cpp / mmu.cpp / ppu.cpp / apu.cpp / emulator.cpp
+├── roms/                 # 測試與範例 ROM (acid2, cpu_instrs, tetris 等)
+├── build/                # CMake/VS 產物 (生成後)
+└── x64/Debug/            # Visual Studio 輸出（含 SDL3.dll）
 ```
 
-## Detailed Tasks
+## 編譯與執行
+### Visual Studio (Windows)
+1. 開啟 `GameBoy.sln`。
+2. 設定組態 `Debug | x64`。
+3. 建置後 `SDL3.dll` 會自動複製到輸出目錄。若缺失可手動放入。
+4. 執行範例：
+	- 若從【專案根目錄】呼叫（建議，路徑最簡單）：
+```powershell
+./x64/Debug/GameBoy.exe ./roms/cpu_instrs.gb
+./x64/Debug/GameBoy.exe ./roms/dmg-acid2.gb
+./x64/Debug/GameBoy.exe ./roms/dmg-acid2.gb 32   # 指定 LCD start offset (例：32)
+```
+	- 若在 `build\Debug` 資料夾內（CMake 產物目錄）：需回到兩層以上找 ROM：
+```powershell
+./GameBoy.exe ../../roms/cpu_instrs.gb
+./GameBoy.exe ../../roms/dmg-acid2.gb
+```
+	  注意：`build/Debug` 目錄下沒有 `x64/Debug` 子資料夾；若要執行根目錄的 VS 輸出，可用：
+```powershell
+../../x64/Debug/GameBoy.exe ../../roms/dmg-acid2.gb
+```
+	  (第一個 `../../` 回到專案根，再進入 `x64/Debug`)
+	- 若在 `x64\Debug`（Visual Studio 直接輸出）：ROM 相對路徑同根目錄：
+```powershell
+./GameBoy.exe ./roms/cpu_instrs.gb
+./GameBoy.exe ./roms/dmg-acid2.gb
+```
 
-The development of the GameBoy emulator is broken down into the following detailed tasks. Each task represents a significant component of the emulator.
+### CMake
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Debug
+build/Debug/GameBoy.exe ../../roms/cpu_instrs.gb
+build/Debug/GameBoy.exe ../../roms/dmg-acid2.gb
+# 或回到根目錄：
+./x64/Debug/GameBoy.exe ./roms/dmg-acid2.gb
+```
 
-### Phase 1: Project Setup and Basic Infrastructure
-1. **✅ Set up C++ project with SDL3 integration**
-   - Create Visual Studio project
-   - Configure C++14 standard
-   - Integrate vcpkg for SDL3
-   - Verify SDL3 initialization
+## 常用測試 ROM
+| ROM | 目的 |
+|-----|------|
+| `cpu_instrs.gb` | 驗證 CPU 指令與中斷行為（已全部通過） |
+| `dmg-acid2.gb` | 嚴格驗證 PPU 時序與圖像組合（已通過） |
+| `tetris.gb` | 實際遊戲功能驗證 |
 
-2. **✅ Implement basic project structure**
-   - Create directories for source, headers, and resources
-   - Set up CMakeLists.txt for cross-platform builds
-   - Add version control (Git)
+## 測試結果
+![CPU測試結果](cpu_test.png "CPU測試全通過")
+![DMG-](dmg_acid2_test.png "DMG-酸測試全通過")
+![Instr Timing](instr_timing_test.png "指令週期測試")
 
-### Phase 2: CPU Emulation
-3. **✅ Implement LR35902 CPU core**
-   - ✅ Define CPU registers and flags
-   - ✅ Implement complete instruction set (all 256 documented opcodes)
-     - ✅ Control: NOP, HALT, STOP, DI, EI
-     - ✅ Loads: LD (8-bit and 16-bit), LDH, all register and indirect variants
-     - ✅ Arithmetic: ADD, ADC, SUB, SBC, INC, DEC, ADD HL, rr
-     - ✅ Logical: AND, OR, XOR, CP (all variants)
-     - ✅ Stack: PUSH, POP (all register pairs)
-     - ✅ Jumps: JP, JR, CALL, RET, RETI, RST (all conditional variants)
-     - ✅ Rotates: RLCA, RRCA, RLA, RRA
-     - ✅ CB Prefix: RLC, RRC, RL, RR, SLA, SRA, SRL, SWAP, BIT, SET, RES (all 8 registers + (HL))
-     - ✅ Misc: CPL, SCF, CCF, DAA
-     - ✅ Special loads: LD (a16) SP, LD SP HL, LD HL SP+n
-     - ✅ Undefined opcodes: Handled as NOP
-   - ✅ Handle interrupt system (IME, IE, IF)
-   - ✅ Implement clock cycle accuracy for all instructions
-   - ⚠️ **Status**: 8/11 cpu_instrs.gb test groups passing
-     - Groups 2, 6, 10 fail - **requires further debugging**
-     - Periodic failure pattern suggests timing or state management issue
-     - See DEBUG_NOTES.md for detailed analysis and recommendations
+### OAM / Sprite 測試與 acid2 使用說明
+`dmg-acid2.gb` 可用來檢驗：背景/視窗組合、Sprite 排序與遮蔽、Mode2/Mode3 時序。
 
-4. **✅ Memory Management Unit (MMU)**
-   - ✅ Implement 64KB memory map (ROM, WRAM, HRAM, I/O registers)
-   - ✅ Implement memory-mapped I/O (0xFF00-0xFFFF)
-   - ✅ Serial port (0xFF01, 0xFF02) for test ROM output
-   - ✅ Interrupt registers (0xFF0F, 0xFFFF)
-   - ✅ PPU register access (0xFF40-0xFF4B)
-   - ✅ APU register mapping
-   - 🔄 ROM/RAM banking (basic structure in place)
+執行後預設會在第一個有 window 的掃描線輸出一次 OAM dump（格式：`[PPU] OAM dump (index:y x tile attr)`）。
 
-### Phase 3: Graphics and Display
-5. **✅ Picture Processing Unit (PPU) emulation**
-   - ✅ Implement tile-based graphics (background and window)
-   - ✅ Handle sprite rendering (OAM scanning, priority, flipping)
-   - ✅ Implement background and window layers
-   - ✅ Manage LCD timing (OAM search, pixel transfer, HBlank, VBlank)
-   - ✅ LCD interrupt handling (VBlank, STAT)
+若要反覆觀察或長期監視 OAM：
+1. 在 `src\ppu.cpp` 尋找 OAM dump 的 `static bool oam_dumped` 判斷，刪除或改為計數（例如每 60 幀輸出一次）。
+2. 再次建置並執行 acid2 ROM。
 
-6. **✅ SDL3 Graphics Integration**
-   - ✅ Set up SDL3 window and renderer
-   - ✅ Implement frame buffer rendering
-   - ✅ Handle screen scaling and aspect ratio
+OAM 項目解讀：
+- y/x：Sprite 左上角座標 (硬體為 y+16, x+8 的顯示偏移；程式可視需求加偏移)。
+- tile：Tile 編號；8x16 模式下自動偶數對齊（顯示時會用 tile 與 tile+1 上下連接）。
+- attr 位元：Priority / Y flip / X flip / Palette（僅 DMG）等；可用 bitmask 驗證。
 
-### Phase 4: Input and Controls
-7. **✅ Input handling**
-   - ✅ Map keyboard inputs to GameBoy buttons
-   - ✅ Implement joypad register emulation
-   - ✅ Handle input interrupts
-   - ✅ Fixed interrupt enable initialization (interrupts now properly enabled)
+常見檢查清單：
+- acid2 中右側視窗的 Sprite 是否被背景正確遮蔽 (color0 透明 + behind_bg 規則)。
+- 多於 10 個 Sprite 時僅前 10 個（OAM 順序）進入該行渲染。
+- 8x16 模式的翻轉：Y flip 應交換上下半部；X flip 僅水平鏡像，不影響 tile 選擇順序。
 
-### Phase 5: Audio Emulation
-8. **✅ Audio Processing Unit (APU)**
-   - ✅ Implement 4-channel audio synthesis (2 pulse, 1 wave, 1 noise)
-   - ✅ Handle wave, noise, and pulse channels
-   - ✅ Integrate with SDL3 audio (push model, 44.1kHz stereo)
-
-### Phase 6: Timer Emulation
-9. **✅ Timer System** (NEW - COMPLETED)
-   - ✅ DIV register (0xFF04) - Internal divider, returns high byte of 16-bit counter
-   - ✅ TIMA register (0xFF05) - 8-bit counter with automatic increment
-   - ✅ TAC register (0xFF07) - Control byte (frequency select bits 0-1, enable bit 2)
-   - ✅ Four timer frequencies based on TAC bits 0-1:
-     - 00: 1024 M-cycles per increment (4096 Hz)
-     - 01: 16 M-cycles per increment (262144 Hz)
-     - 10: 64 M-cycles per increment (65536 Hz)
-     - 11: 256 M-cycles per increment (16384 Hz)
-   - ✅ Bit-edge detection: TIMA increments on falling edge of selected divider bit
-   - ✅ Timer interrupt (IF register bit 2) triggered on TIMA overflow (0xFF → 0x00)
-   - ✅ TIMA overflow delay: 4 M-cycle delay before interrupt flag is set
-   - ⚠️ **Note**: test 02:04 still fails despite implementation
-     - All other tests (01, 03-11) pass successfully
-     - May require additional Game Boy hardware quirks or timing details
-
-### Phase 7: Cartridge and ROM Support
-10. **✅ ROM loading and parsing**
-   - ✅ Load ROM file from disk
-   - ✅ Parse ROM header (0x0100-0x014F)
-     - ✅ Extract game title, cartridge type, ROM/RAM size
-     - ✅ Validate checksums
-     - ✅ Determine MBC type and features
-   - 🔄 Support various GameBoy cartridge types (basic ROM only implemented)
-   - 🔄 Implement MBC (Memory Bank Controller) logic
-   - 🔄 Handle save data (SRAM) with battery backup
-
-11. **File I/O for save states**
-    - Implement save/load state functionality
-    - Support battery-backed saves
-
-### Phase 8: Advanced Features
-12. **Debugging tools**
-    - CPU instruction logging
-    - Memory viewer
-    - Breakpoints and stepping
-
-13. **Performance optimization**
-    - Optimize rendering loop
-    - Implement frame skipping
-    - Profile and optimize CPU emulation
-
-14. **Cross-platform support**
-    - Test on Windows, Linux, and macOS
-    - Update CMake configuration
-
-15. **Testing and validation**
-    - Test with various ROMs
-    - Implement unit tests for components
-    - Validate against real GameBoy behavior
-
-### Phase 9: Finalization
-16. **User interface**
-    - Implement menu system
-    - Add settings and configuration
-    - Create launcher application
-
-17. **Documentation and packaging**
-    - Complete README and documentation
-    - Create installer or portable package
-    - Add licensing information
-
-## Contributing
-
-Contributions are welcome! Please fork the repository and submit pull requests. For major changes, please open an issue first to discuss what you would like to change.
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- Nintendo for creating the GameBoy
-- The SDL development team
-
-- Various open-source GameBoy emulator projects for reference
+如需正式自動化測試，可將 doctest 加入一個 OAM 驗證：執行數幀後讀 `0xFE00`~`0xFE9F` 比對期望。README 中後續將補充專用測試檔示例。
 
 
+
+## 除錯輸出 (Debug)
+目前以 `std::cout` 直接列印：
+- 初始 PPU frame 設定 (LCDC/SCX/SCY/WX/WY)。
+- 每幀前 12 行 window 右側 tile IDs（酸測試用）。
+- OAM dump（僅第一個 window 行）。
+要縮減：可在未來加入宏 `#define GB_DEBUG_PPU 0` 控制或改用 logger。
+
+## 開發指引 / 下一步建議
+1. 實作像素 FIFO：逐像素推入背景 / window，再套用 sprite 優先，解決 acid2 視窗更新時機問題。
+2. 將除錯輸出改為可切換旗標，避免 I/O 對模擬速度影響。
+3. 加入 PPU memory lock：Mode2 鎖 OAM、Mode3 鎖 OAM+VRAM。
+4. 加入單元測試（可用 doctest 或 Catch2）驗證 palette 及 sprite behind_bg 邏輯。
+5. 撰寫 APU 聲道行為測試（square / wave / noise）。
+
+## 版權與 ROM 使用
+請僅使用合法取得或公開授權的 ROM；測試 ROM 皆為社群提供的技術驗證用途。
+
+## 歷程摘要
+- 修復早期掃描線跳躍 (LY 跳 9→134)。
+- 改 cycles 型別避免 uint8_t 溢位錯亂。
+- 重構 PPU 模式與渲染順序；加入背景 raw color id 緩衝。
+- 修正 sprite 8x16 + 翻轉邏輯與優先遮蔽。
+- 修正中斷週期計算與 EI 延遲後，`cpu_instrs` 全通過。
+- 實作 CPU 端 VRAM/OAM 忙碌鎖定與 PPU 專用 `ppu_read`，修復 Mode2/3 期間資料讀取；`dmg-acid2` 通過。
+
+## 貢獻
+歡迎提交 Issue / PR：可聚焦於 PPU FIFO、APU 精準化、效能或測試框架。
+
+
+## 參考資料
+ - https://gbdev.io/pandocs/
+
+---
+最後更新：2025-11-13
