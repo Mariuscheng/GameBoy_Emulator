@@ -57,9 +57,13 @@ public:
     // CPU state
     bool halted;
     bool just_woken_from_halt; // Flag to handle HALT bug interrupt processing
+    bool halt_bug_active; // Triggers modified fetch (PC not incremented) after HALT bug condition
 
     // Debug counter
     uint64_t step_count;
+    // HALT debug counters
+    uint32_t halt_count;        // Number of HALT instructions executed
+    uint32_t halt_bug_count;    // Number of HALT bug triggers (one-shot fetch glitches)
 
     // Methods
     void reset();
@@ -73,6 +77,8 @@ public:
 private:
     MMU& mmu;
     std::ofstream log_file;
+    // Instruction cycle instrumentation log (used for instr_timing analysis)
+    std::ofstream instr_cycle_log;
 
     // Helper functions
     void add(uint8_t value);

@@ -3,10 +3,10 @@
 #include <iostream>
 #include <algorithm>
 
-PPU::PPU() : cycle_count(0), shadow_scx(0), shadow_scy(0), ppu_mode(2) {
-    // Initialize registers
-    lcdc = 0x91;
-    stat = 0x85;
+PPU::PPU() : cycle_count(0), shadow_scx(0), shadow_scy(0), ppu_mode(0) {
+    // Initialize registers (start with LCD off so test ROMs control enable timing)
+    lcdc = 0x00; // Bit7 off
+    stat = 0x80; // Bit7 always 1, mode bits 0
     scy = scx = 0;
     ly = 0;
     lyc = 0;
@@ -17,6 +17,14 @@ PPU::PPU() : cycle_count(0), shadow_scx(0), shadow_scy(0), ppu_mode(2) {
 
     framebuffer.fill(0xFFFFFFFF); // White background (will be overwritten per scanline)
     bgwin_pixel_ids.fill(0);      // All background pixels start as color 0
+
+    // OAM bug scan tracking init
+    oam_search_pair_base = 0xFE00;
+    oam_last_mode2_pair_base = 0xFE00;
+    
+    // Initialize pending flags
+    pending_lcd_enable = false;
+    pending_lcd_enable = false;
 }
 
 PPU::~PPU() {
@@ -24,6 +32,19 @@ PPU::~PPU() {
 
 void PPU::step(int cycles, MMU& mmu) {
     for (int i = 0; i < cycles; ++i) {
+        global_cycles++; // 全域 PPU 週期計數（包含 LCD 關閉期間）
+        
+        // Check for pending LCD enable (delayed by 1 cycle) - REMOVED: immediate enable now
+        
+        // 如果 LCD 關閉：依規格 LY 固定為 0，停止模式循環與渲染/中斷
+        if (!(lcdc & 0x80)) {
+            // LCD 關閉：保持 LY=0，不進行模式循環，但仍然累積關閉期間的 CPU 週期以便重啟時對齊偏移
+            ly = 0;
+            ppu_mode = 0; // 靜止狀態視作 mode 0
+            stat = (stat & ~0x03) | 0x00;
+            off_cycle_counter++; // 保留偏移
+            continue; // 不執行渲染或中斷
+        }
         // Determine mode based on whether we're in VBlank or visible area
         uint8_t new_mode;
         
@@ -58,6 +79,16 @@ void PPU::step(int cycles, MMU& mmu) {
                 shadow_scx = scx;
                 shadow_scy = scy;
                 render_scanline(mmu, shadow_scx, shadow_scy);
+                // Freeze last mode2 pair as corruption source for duration of mode3
+                oam_last_mode2_pair_base = oam_search_pair_base;
+                // 若最近一次 LCDC ON 事件尚未記錄第一個 Mode3 週期，則記錄
+                if (!lcd_on_events.empty()) {
+                    LcdOnEvent &ev = lcd_on_events.back();
+                    if (!ev.mode3_recorded) {
+                        ev.first_mode3_cycle = cycle_count;
+                        ev.mode3_recorded = true;
+                    }
+                }
             } else if (ppu_mode == 0) {
                 // Mode 0 (HBlank)
                 if (stat & 0x08) {
@@ -82,7 +113,25 @@ void PPU::step(int cycles, MMU& mmu) {
             }
         }
 
+        // OAM search pair tracking during Mode2 (each 2 cycles processes one sprite Y/X)
+        if (ppu_mode == 2) {
+            // cycle_count is cycles elapsed so far in this scanline BEFORE increment below.
+            // Map 0..79 -> sprite index 0..39 (2 cycles per sprite). Pair base uses Y/X (first two bytes) at FE00 + i*4.
+            uint8_t sprite_index = (cycle_count < 80) ? (uint8_t)(cycle_count / 2) : 39;
+            oam_search_pair_base = 0xFE00 + sprite_index * 4;
+        }
+
         cycle_count++;
+
+        if (log_after_lcd_on && lcd_on_log_cycles_remaining > 0) {
+            std::cout << "[PPU][LCD ON TRACE] gcy=" << global_cycles
+                      << " ly=" << (int)ly << " cyc=" << cycle_count
+                      << " mode=" << (int)ppu_mode << std::endl;
+            lcd_on_log_cycles_remaining--;
+            if (lcd_on_log_cycles_remaining == 0) {
+                log_after_lcd_on = false;
+            }
+        }
 
         // One-time debug of initial register setup for acid2 layout issues
         if (!frame_info_printed && ly == 0 && cycle_count == 1) {
@@ -98,6 +147,13 @@ void PPU::step(int cycles, MMU& mmu) {
 
             uint8_t old_ly = ly;
             ly++;
+
+            // Window line counter increments only on lines where the window is actually visible
+            // Conditions: window enabled, in visible area, LY >= WY, WX <= 166
+            // We check the line that just finished (old_ly), so the increment applies for next line's rendering
+            if ((lcdc & 0x20) && old_ly < 144 && old_ly >= wy && wx <= 166) {
+                if (win_line_counter < 0xFFFF) win_line_counter++;
+            }
 
             // LYC coincidence
             if (ly == lyc) {
@@ -116,6 +172,9 @@ void PPU::step(int cycles, MMU& mmu) {
                 ly = 0;
                 ppu_mode = 2;
                 stat = (stat & ~0x03) | 0x02;
+
+                // Reset window line counter at start of new frame
+                win_line_counter = 0;
 
                 // STAT mode 2 interrupt
                 if (stat & 0x20) {
@@ -156,7 +215,7 @@ void PPU::render_background(MMU& mmu, uint8_t shadow_scx, uint8_t shadow_scy) {
         int tile_y = bg_y / 8;
 
         uint16_t tile_map_addr = bg_tile_map + tile_y * 32 + tile_x;
-        uint8_t tile_id = mmu.read_byte(tile_map_addr);
+        uint8_t tile_id = mmu.ppu_read(tile_map_addr);
 
         // Handle tile ID addressing based on LCDC.4
         uint16_t tile_addr;
@@ -196,7 +255,8 @@ void PPU::render_window(MMU& mmu, uint8_t shadow_scx, uint8_t shadow_scy) {
 
     for (int x = std::max(0, win_x); x < 160; ++x) {
         int win_pixel_x = x - win_x; // Window-local X (0..159)
-        int win_pixel_y = ly - wy;
+        // Use internal window line counter for vertical addressing, not (LY - WY)
+        int win_pixel_y = static_cast<int>(win_line_counter);
 
         // Clamp window coordinates to prevent out-of-bounds access
         if (win_pixel_x < 0 || win_pixel_x >= 160) continue;
@@ -209,7 +269,7 @@ void PPU::render_window(MMU& mmu, uint8_t shadow_scx, uint8_t shadow_scy) {
         if (tile_x < 0 || tile_x >= 32 || tile_y < 0 || tile_y >= 32) continue;
 
         uint16_t tile_map_addr = win_tile_map + tile_y * 32 + tile_x;
-        uint8_t tile_id = mmu.read_byte(tile_map_addr);
+        uint8_t tile_id = mmu.ppu_read(tile_map_addr);
 
         // Handle tile ID addressing based on LCDC.4
         uint16_t tile_addr;
@@ -239,7 +299,7 @@ void PPU::render_window(MMU& mmu, uint8_t shadow_scx, uint8_t shadow_scy) {
     last_frame_ly = ly;
 
     if (ly >= wy && window_debug_lines_printed < 12) {
-        int win_line = ly - wy; // window 內部行
+        int win_line = static_cast<int>(win_line_counter); // window 內部行（使用內部行計數器）
         // 右側顯示範圍：tile_x 14..19 (總寬 20 tiles)，集中觀察右下異常區
         std::cout << "[PPU] WIN line=" << win_line << " LY=" << (int)ly
                   << " WY=" << (int)wy << " WX=" << (int)wx
@@ -247,7 +307,7 @@ void PPU::render_window(MMU& mmu, uint8_t shadow_scx, uint8_t shadow_scy) {
         for (int tx = 14; tx < 20; ++tx) {
             int ty = win_line / 8;
             uint16_t addr = win_tile_map + ty * 32 + tx;
-            std::cout << std::hex << (int)mmu.read_byte(addr) << ' ';
+            std::cout << std::hex << (int)mmu.ppu_read(addr) << ' ';
         }
         std::cout << std::dec << std::endl;
     window_debug_lines_printed++;
@@ -258,10 +318,10 @@ void PPU::render_window(MMU& mmu, uint8_t shadow_scx, uint8_t shadow_scy) {
             std::cout << "[PPU] OAM dump (index:y x tile attr)" << std::endl;
             for (int i = 0; i < 40; ++i) {
                 uint16_t oam_addr = 0xFE00 + i * 4;
-                uint8_t sy = mmu.read_byte(oam_addr);
-                uint8_t sx = mmu.read_byte(oam_addr + 1);
-                uint8_t st = mmu.read_byte(oam_addr + 2);
-                uint8_t sa = mmu.read_byte(oam_addr + 3);
+                uint8_t sy = mmu.ppu_read(oam_addr);
+                uint8_t sx = mmu.ppu_read(oam_addr + 1);
+                uint8_t st = mmu.ppu_read(oam_addr + 2);
+                uint8_t sa = mmu.ppu_read(oam_addr + 3);
                 // 僅列出可能在右側顯示區的 sprite 以減少噪音
                 if (sx >= 80) {
                     std::cout << "  [" << i << "] " << (int)sy << " " << (int)sx << " " << std::hex << (int)st << " " << (int)sa << std::dec << std::endl;
@@ -285,8 +345,8 @@ void PPU::render_sprites(MMU& mmu) {
     uint8_t sprite_height_global = (lcdc & 0x04) ? 16 : 8;
     for (int i = 0; i < 40 && sprites_on_line.size() < 10; ++i) {
         uint16_t oam_addr = 0xFE00 + i * 4;
-        Sprite sprite{ mmu.read_byte(oam_addr), mmu.read_byte(oam_addr + 1),
-                       mmu.read_byte(oam_addr + 2), mmu.read_byte(oam_addr + 3) };
+        Sprite sprite{ mmu.ppu_read(oam_addr), mmu.ppu_read(oam_addr + 1),
+                   mmu.ppu_read(oam_addr + 2), mmu.ppu_read(oam_addr + 3) };
         if (sprite.y == 0 || sprite.x == 0) continue; // Hidden sprites (hardware treats 0 as off-screen)
         if (ly + 16 >= sprite.y && ly + 16 < sprite.y + sprite_height_global) {
             sprites_on_line.push_back(sprite);
@@ -326,8 +386,8 @@ void PPU::render_sprites(MMU& mmu) {
 
 uint8_t PPU::get_tile_pixel(MMU& mmu, uint16_t tile_addr, uint8_t x, uint8_t y) const {
     uint16_t row_addr = tile_addr + y * 2;
-    uint8_t byte1 = mmu.read_byte(row_addr);
-    uint8_t byte2 = mmu.read_byte(row_addr + 1);
+    uint8_t byte1 = mmu.ppu_read(row_addr);
+    uint8_t byte2 = mmu.ppu_read(row_addr + 1);
 
     uint8_t bit = 7 - x;
     uint8_t pixel = ((byte1 & (1 << bit)) ? 1 : 0) | ((byte2 & (1 << bit)) ? 2 : 0);
@@ -355,7 +415,69 @@ uint8_t PPU::get_lcdc() const {
 }
 
 void PPU::set_lcdc(uint8_t value) {
+    uint8_t prev = lcdc;
+    bool turning_on = !(lcdc & 0x80) && (value & 0x80);
+    bool turning_off = (lcdc & 0x80) && !(value & 0x80);
+    bool window_enable_0_to_1 = !(lcdc & 0x20) && (value & 0x20);
     lcdc = value;
+    std::cout << "[PPU] LCDC write prev=" << std::hex << (int)prev << " new=" << (int)value
+              << std::dec << " ly=" << (int)ly << " cyc=" << cycle_count
+              << (turning_on?" (ON edge)":"") << (turning_off?" (OFF edge)":"") << std::endl;
+    if (turning_on) {
+        // LCD turning on: immediate enable for accurate timing
+        ly = 0;
+        cycle_count = lcd_start_cycle_offset % 456; // safeguard
+        // Determine initial mode from cycle_count per normal visible line timing
+        if (cycle_count < 80) {
+            ppu_mode = 2; // OAM search start
+        } else if (cycle_count < 252) {
+            ppu_mode = 3; // Pixel transfer (started late in line)
+        } else {
+            ppu_mode = 0; // HBlank
+        }
+        stat = (stat & ~0x03) | ppu_mode;
+        std::cout << "[PPU] LCDC ON executed gcy=" << global_cycles << " offset=" << lcd_start_cycle_offset
+                  << " init_cycle=" << cycle_count << " init_mode=" << (int)ppu_mode << std::endl;
+        // Trace LCD ON timing for sync diagnostics
+        if (global_cycles >= 0) { // Always trace in headless mode
+            std::cout << "[PPU][LCD ON TRACE] gcy=" << global_cycles << " ly=" << (int)ly << " cyc=" << cycle_count << " mode=" << (int)ppu_mode << std::endl;
+        }
+    } else if (turning_off) {
+        // LCD 關閉：LY 立即歸 0；停止行內累積但保留偏移計時器於 0
+        ly = 0;
+        cycle_count = 0;
+        ppu_mode = 0;
+        stat = (stat & ~0x03) | 0x00;
+        off_cycle_counter = 0;
+        win_line_counter = 0;
+    }
+    // Reset window line counter when Window Enable bit goes 0->1
+    if (window_enable_0_to_1) {
+        win_line_counter = 0;
+    }
+}
+
+void PPU::dump_lcd_on_summary() const {
+    if (lcd_on_events.empty()) {
+        std::cout << "[PPU][LCD ON SUMMARY] (no events)" << std::endl;
+        return;
+    }
+    std::cout << "[PPU][LCD ON SUMMARY] count=" << lcd_on_events.size() << std::endl;
+    std::cout << " idx | gcy_on | start_cyc | applied_offset | ly_on | init_mode | first_mode3_cyc | mode3_delta | off_cycles_before_on" << std::endl;
+    for (size_t i = 0; i < lcd_on_events.size(); ++i) {
+        const auto &ev = lcd_on_events[i];
+        int delta = ev.mode3_recorded ? (int)ev.first_mode3_cycle - (int)ev.start_cycle_count : -1;
+        std::cout << "  " << i
+                  << " | " << ev.global_cycles_at_on
+                  << " | " << ev.start_cycle_count
+                  << " | " << ev.applied_offset
+                  << " | " << (int)ev.ly_at_on
+                  << " | " << (int)ev.initial_mode
+                  << " | " << (ev.mode3_recorded ? std::to_string(ev.first_mode3_cycle) : std::string("(none)"))
+                  << " | " << (ev.mode3_recorded ? std::to_string(delta) : std::string("(n/a)"))
+                  << " | " << ev.off_cycles_before_on
+                  << std::endl;
+    }
 }
 
 uint8_t PPU::get_stat() const {

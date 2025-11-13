@@ -25,7 +25,7 @@ MMU::MMU()
 {
     memory.fill(0xFF);
     // Open serial output file in project root
-    serial_output_file.open("../serial_output.txt", std::ios::out | std::ios::trunc);
+    serial_output_file.open("serial_output.txt", std::ios::out | std::ios::trunc);
 }
 
 MMU::~MMU() {
@@ -38,6 +38,25 @@ MMU::~MMU() {
 bool MMU::load_rom(const std::vector<uint8_t>& rom_data) {
     rom = rom_data;
     parse_rom_header();
+    // Quick ROM scan for HALT (0x76) opcode occurrences to aid HALT bug debugging
+    size_t halt_opcode_count = 0;
+    std::vector<uint16_t> first_halt_addresses;
+    for (size_t i = 0; i < rom.size(); ++i) {
+        if (rom[i] == 0x76) {
+            ++halt_opcode_count;
+            if (first_halt_addresses.size() < 10) {
+                first_halt_addresses.push_back(static_cast<uint16_t>(i));
+            }
+        }
+    }
+    std::cout << "[ROM SCAN] HALT opcode count=" << halt_opcode_count << std::endl;
+    if (!first_halt_addresses.empty()) {
+        std::cout << "[ROM SCAN] First HALT addresses:";
+        for (auto addr : first_halt_addresses) {
+            std::cout << " 0x" << std::hex << (int)addr << std::dec;
+        }
+        std::cout << std::endl;
+    }
     // Map fixed bank 0 to memory for convenience (optional)
     size_t copy_len = std::min<size_t>(0x4000, rom.size());
     std::copy(rom.begin(), rom.begin() + copy_len, memory.begin());
@@ -150,6 +169,16 @@ bool MMU::is_japanese() const {
 
 // --- Memory access ---
 
+// PPU 專用讀取：繞過 Mode2/3 的 VRAM/OAM 鎖定，僅供 PPU 在渲染時讀取
+uint8_t MMU::ppu_read(uint16_t address) {
+    // VRAM 0x8000-0x9FFF、OAM 0xFE00-0xFE9F 直接讀取
+    if ((address >= 0x8000 && address <= 0x9FFF) || (address >= 0xFE00 && address <= 0xFE9F)) {
+        return memory[address];
+    }
+    // 其他位址沿用一般讀取（不會觸發 VRAM/OAM 鎖定）
+    return read_byte(address);
+}
+
 uint8_t MMU::read_byte(uint16_t address) {
     if (address <= ROM_BANK_0_END) {
         if (address < rom.size()) return rom[address];
@@ -200,6 +229,22 @@ uint8_t MMU::read_byte(uint16_t address) {
     // APU registers
     if (address >= 0xFF10 && address <= 0xFF3F) {
         return apu.read_register(address);
+    }
+
+    // OAM access restriction during Mode 2 (OAM search) and Mode 3 (pixel transfer)
+    if (address >= 0xFE00 && address <= 0xFE9F) {
+        uint8_t mode = ppu.get_stat() & 0x03;
+        if (mode == 2 || mode == 3) {
+            return 0xFF; // OAM locked, return 0xFF
+        }
+    }
+
+    // VRAM access restriction during Mode 3 (pixel transfer)
+    if (address >= 0x8000 && address <= 0x9FFF) {
+        uint8_t mode = ppu.get_stat() & 0x03;
+        if (mode == 3) {
+            return 0xFF; // VRAM locked, return 0xFF
+        }
     }
 
     return memory[address];
@@ -278,6 +323,7 @@ void MMU::write_byte(uint16_t address, uint8_t value) {
         case 0xFF41: ppu.set_stat(value); return;
         case 0xFF42: ppu.set_scy(value); return;
         case 0xFF43: ppu.set_scx(value); return;
+        case 0xFF44: ppu.set_ly(0); return; // Writing to LY resets it to 0 on hardware
         case 0xFF45: ppu.set_lyc(value); return;
         case 0xFF47: ppu.set_bgp(value); return;
         case 0xFF48: ppu.set_obp0(value); return;
@@ -290,8 +336,56 @@ void MMU::write_byte(uint16_t address, uint8_t value) {
     // APU IO
     if (address >= 0xFF10 && address <= 0xFF3F) { apu.write_register(address, value); return; }
 
+    // OAM access restriction + corruption emulation
+    if (address >= 0xFE00 && address <= 0xFE9F) {
+        uint8_t mode = ppu.get_stat() & 0x03;
+        if (mode == 2 || mode == 3) {
+            // Precise source selection:
+            // Mode2: current pair being fetched by OAM search (Y/X of sprite index)
+            // Mode3: frozen last Mode2 pair (source does not advance)
+            uint16_t source_base = (mode == 2) ? ppu.get_oam_search_pair_base()
+                                              : ppu.get_oam_last_mode2_pair_base();
+            uint16_t dest_pair_base = address & 0xFFFE; // align to Y/X pair
+            uint8_t src_lo = memory[source_base];
+            uint8_t src_hi = memory[source_base + 1];
+            memory[dest_pair_base] = src_lo;
+            if (dest_pair_base + 1 <= 0xFE9F) memory[dest_pair_base + 1] = src_hi;
+            return; // write consumed by corruption
+        }
+        // Normal (unrestricted) OAM write
+    }
+
+    // VRAM access restriction during Mode 3 (pixel transfer)
+    if (address >= 0x8000 && address <= 0x9FFF) {
+        uint8_t mode = ppu.get_stat() & 0x03;
+        if (mode == 3) {
+            return; // VRAM locked, ignore write
+        }
+    }
+
+    // OAM DMA (FF46): copy 160 bytes from source page to OAM
+    if (address == 0xFF46) {
+        // On real hardware, DMA takes ~160 µs (160 bytes) and blocks CPU on DMG.
+        // For now, perform an immediate copy for functional correctness.
+        uint16_t src_base = static_cast<uint16_t>(value) << 8; // value * 0x100
+        for (uint16_t i = 0; i < 160; ++i) {
+            uint16_t src = src_base + i;
+            uint16_t dst = 0xFE00 + i;
+            // During DMA, reads should come from memory array directly (bypass restrictions)
+            uint8_t b = memory[src];
+            memory[dst] = b;
+        }
+        memory[address] = value;
+        return;
+    }
+
     memory[address] = value;
 }
+
+// Debug toggle for timer logs
+#ifndef GB_DEBUG_TIMER
+#define GB_DEBUG_TIMER 0
+#endif
 
 void MMU::update_timer_cycles(uint8_t cycles) {
     for (uint8_t c = 0; c < cycles; ++c) {
@@ -321,13 +415,19 @@ void MMU::update_timer_cycles(uint8_t cycles) {
         // Falling edge (1 to 0)
         if (prev_bit && !curr_bit) {
             timer_counter++;
-            std::cout << "[TIMER] TIMA incremented to " << (int)timer_counter << " at internal_counter=" << internal_counter << std::endl;
+            if (GB_DEBUG_TIMER) {
+                std::cout << "[TIMER] TIMA incremented to " << (int)timer_counter << " at internal_counter=" << internal_counter << std::endl;
+            }
             if (timer_counter == 0x00) {
                 // Overflow: TIMA wraps to 0x00, IF is set immediately
                 // Then TIMA reloads from TMA immediately (no delay for test compatibility)
-                std::cout << "[TIMER] TIMA overflow! TAC=" << (int)timer_control << " TMA=" << (int)timer_modulo << std::endl;
+                if (GB_DEBUG_TIMER) {
+                    std::cout << "[TIMER] TIMA overflow! TAC=" << (int)timer_control << " TMA=" << (int)timer_modulo << std::endl;
+                }
                 interrupt_flag |= 0x04;
-                std::cout << "[TIMER] Set interrupt_flag to " << (int)interrupt_flag << std::endl;
+                if (GB_DEBUG_TIMER) {
+                    std::cout << "[TIMER] Set interrupt_flag to " << (int)interrupt_flag << std::endl;
+                }
                 timer_counter = timer_modulo; // Immediate reload for test compatibility
                 // tima_overflow_pending = true;
                 // tima_overflow_delay = 4;

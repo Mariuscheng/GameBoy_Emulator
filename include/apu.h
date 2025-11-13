@@ -3,7 +3,13 @@
 
 #include <cstdint>
 #include <array>
+#include <deque>
+#include <iostream>
 #include <SDL3/SDL.h>
+
+#ifndef GB_APU_DEBUG
+#define GB_APU_DEBUG 0
+#endif
 
 class APU {
 public:
@@ -22,13 +28,22 @@ public:
 
 private:
     // Audio specifications
-    static constexpr int SAMPLE_RATE = 44100;
+    static constexpr int SAMPLE_RATE = 44100; // Output sample rate
     static constexpr int CHANNELS = 2; // Stereo
     static constexpr float AMPLITUDE = 0.3f;
+    static constexpr double CPU_CLOCK = 4194304.0; // Game Boy CPU clock (Hz)
 
     // Frame sequencer (512Hz)
     uint16_t frame_counter;
     uint8_t frame_step;
+    bool apu_was_off = false; // Track power edge for NR52
+
+    // Sample generation timing
+    double sample_timer;              // Accumulated CPU cycles toward next audio sample
+    double cycles_per_sample;         // CPU cycles per one audio sample (≈95.088)
+
+    // FIFO of generated audio samples (interleaved stereo floats)
+    std::deque<float> audio_fifo;
 
     // Channel 1: Pulse with sweep and envelope
     struct PulseChannel {
@@ -53,10 +68,8 @@ private:
         uint8_t position;
     } ch1;
 
-    // Channel 2: Pulse with envelope
     struct PulseChannel ch2;
 
-    // Channel 3: Wave
     struct WaveChannel {
         // Registers
         uint8_t dac_enabled;    // NR30 (0xFF1A) - bit 7: DAC enable
@@ -72,13 +85,12 @@ private:
         uint16_t frequency;
         uint8_t length_counter;
         uint8_t volume_shift;
-        uint8_t channel_enabled;
+        uint8_t enabled; // 統一命名
         uint16_t timer;
         uint8_t position;
         uint8_t sample_buffer;
     } ch3;
 
-    // Channel 4: Noise
     struct NoiseChannel {
         // Registers
         uint8_t length;     // NR41 (0xFF20) - bits 5-0: length
@@ -114,6 +126,19 @@ private:
     float generate_noise_sample(const NoiseChannel& ch) const;
 
     uint8_t get_duty_waveform(uint8_t duty, uint8_t position) const;
+
+    // Mix current channel state into one stereo sample and push to fifo
+    void mix_and_push_sample();
+    void debug_log(const char* tag, uint16_t addr, uint8_t val) const {
+#if GB_APU_DEBUG
+        std::cout << "[APU] " << tag << " 0x" << std::hex << addr << " <= 0x" << (int)val << std::dec << std::endl;
+#endif
+    }
+    void debug_read(uint16_t addr, uint8_t val) const {
+#if GB_APU_DEBUG
+        std::cout << "[APU] RD 0x" << std::hex << addr << " -> 0x" << (int)val << std::dec << std::endl;
+#endif
+    }
 };
 
 #endif // APU_H

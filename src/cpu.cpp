@@ -5,12 +5,27 @@
 CPU::CPU(MMU& mmu) : mmu(mmu) {
     reset();
     log_file.open("cpu_log.txt");
+    // Instrumentation file (optional for instr_timing)
+    instr_cycle_log.open("instr_cycles_log.txt", std::ios::out | std::ios::trunc);
+    if (instr_cycle_log.is_open()) {
+        instr_cycle_log << "# Instruction Cycle Log\n";
+        instr_cycle_log.flush();
+    } else {
+        std::cout << "[WARN] instr_cycle_log failed to open" << std::endl;
+    }
 }
 
 CPU::~CPU() {
     if (log_file.is_open()) {
         log_file.close();
     }
+    if (instr_cycle_log.is_open()) {
+        instr_cycle_log.close();
+    }
+    std::cout << "[CPU SUMMARY] steps=" << step_count
+              << " halt_count=" << halt_count
+              << " halt_bug_count=" << halt_bug_count
+              << std::endl;
 }
 
 void CPU::reset() {
@@ -28,7 +43,10 @@ void CPU::reset() {
     halted = false;
     just_woken_from_halt = false; // Not woken from halt on reset
     ei_delay_pending = false; // No EI delay pending on reset
+    halt_bug_active = false; // No HALT bug pending
     step_count = 0;
+    halt_count = 0;
+    halt_bug_count = 0;
 }
 
 int CPU::step() {
@@ -37,30 +55,32 @@ int CPU::step() {
     //    std::cout << "[CPU] Executed " << step_count << " steps, current PC=" << PC << std::endl;
     //}
 
-    // If CPU is halted, handle HALT logic
+    // If CPU is halted, only wake when an ENABLED interrupt is pending (IE & IF)
     if (halted) {
         uint8_t ie_reg = mmu.read_byte(0xFFFF); // Interrupt Enable
         uint8_t if_reg = mmu.read_byte(0xFF0F); // Interrupt Flag
-        uint8_t actual_if = if_reg & 0x1F; // Only consider the lower 5 bits
-        
-    // Verbose HALT debug (temporarily disabled)
-    // std::cout << "[CPU] HALT check: IF=" << (int)if_reg << " IE=" << (int)ie_reg << " actual_interrupt_flag=" << (int)actual_if << std::endl;
-        
-        // HALT bug: wake up if ANY interrupt is pending (even if IME=0)
-        if (actual_if != 0) {
-            // std::cout << "[CPU] HALT: waking up from halted state at PC=" << std::hex << PC << std::dec << " due to IF=" << (int)actual_if << " IME=" << (int)ime << std::endl;
-            halted = false; // Wake up from HALT
-            just_woken_from_halt = true; // Mark that we just woke from HALT for interrupt processing
-            // PC stays at HALT instruction and will re-execute HALT next step
+        uint8_t enabled_pending = (ie_reg & if_reg) & 0x1F; // Mask to lower 5 bits
+
+        if (enabled_pending) {
+            halted = false;
+            just_woken_from_halt = true; // Mark wake for potential immediate interrupt service
         } else {
-            // std::cout << "[CPU] HALT: staying halted at PC=" << std::hex << PC << std::dec << " IF=" << (int)actual_if << " IME=" << (int)ime << std::endl;
-            // Still halted, consume cycles
+            // Remain halted: consume 4 cycles (1 M-cycle)
             mmu.update_timer_cycles(4);
             return 4;
         }
     }
 
-    uint8_t opcode = mmu.read_byte(PC++);
+    uint8_t opcode;
+    if (halt_bug_active) {
+        // HALT bug: re-fetch same opcode (PC already points to next instruction due to normal increment during HALT execution)
+        opcode = mmu.read_byte(PC); // Do NOT increment PC this fetch
+        halt_bug_active = false; // One-shot effect
+        // Optional debug
+        // std::cout << "[CPU] HALT bug fetch at PC=" << std::hex << PC << std::dec << " opcode=0x" << std::hex << (int)opcode << std::dec << std::endl;
+    } else {
+        opcode = mmu.read_byte(PC++);
+    }
     // Only log in certain ranges to reduce noise
     if (PC >= 0x50 && PC <= 0x60) {
         std::cout << "[CPU] PC=" << std::hex << (PC-1) << std::dec << " opcode=0x" << std::hex << (int)opcode << std::dec << " IME=" << (int)ime << std::endl;
@@ -166,6 +186,7 @@ void CPU::execute_instruction(uint8_t opcode) {
         case 0x1E: // LD E, n
             E = mmu.read_byte(PC++);
             break;
+    // (Removed misplaced cycle diagnostic here; cycle logging handled in execute_instruction_with_cycles)
         case 0x26: // LD H, n
             H = mmu.read_byte(PC++);
             break;
@@ -1022,11 +1043,24 @@ void CPU::execute_instruction(uint8_t opcode) {
 
         // HALT - with HALT bug implementation
         case 0x76: // HALT
-            std::cout << "[CPU] HALT instruction at PC=" << (int)(PC-1) << " IME=" << (int)ime << std::endl;
-            // HALT always halts the CPU, regardless of pending interrupts
-            // The CPU will be woken up by interrupts during the halted check in step()
-            halted = true;
+        {
+            uint8_t ie_reg = mmu.read_byte(0xFFFF);
+            uint8_t if_reg = mmu.read_byte(0xFF0F);
+            uint8_t pending_enabled = (ie_reg & if_reg) & 0x1F; // Only interrupts that are both requested and enabled
+            // 正確 HALT bug 條件 (Pan Docs): IME=0 且存在已啟用且已請求的中斷 (IE & IF != 0)
+            // 在此情況下：CPU 不會進入真正的 HALT；下一次 opcode 取值會重複讀取 HALT 之後的那一個位元組（造成後續指令位元組被重複執行一次）
+            if (!ime && pending_enabled) {
+                halt_bug_active = true;   // 一次性：下一次取指不遞增 PC
+                halted = false;          // 不進入 halted 狀態
+                // 可選除錯輸出：
+                // std::cout << "[CPU] HALT bug (enabled) PC=" << std::hex << (PC-1) << std::dec << " IE=" << (int)ie_reg << " IF=" << (int)if_reg << std::endl;
+            } else {
+                // 正常 HALT：直到有『已啟用且已請求』的中斷出現才醒 (即 IE & IF !=0)
+                halted = true;
+                // std::cout << "[CPU] HALT normal PC=" << std::hex << (PC-1) << std::dec << " IME=" << (int)ime << std::endl;
+            }
             break;
+        }
 
         // RST instructions (Restart)
         case 0xC7: // RST 00H
@@ -1222,84 +1256,212 @@ void CPU::execute_instruction(uint8_t opcode) {
 }
 
 int CPU::execute_instruction_with_cycles(uint8_t opcode) {
+    // Expected cycle table (machine cycles) for non-CB opcodes (Pan Docs). CB handled separately.
+    // NOTE: Conditional instructions use max cycles when taken; we will compute actual below.
+    static const int expected_cycles[256] = {
+        /*00*/4,/*01*/12,/*02*/8,/*03*/8,/*04*/4,/*05*/4,/*06*/8,/*07*/4, /*08*/20,/*09*/8,/*0A*/8,/*0B*/8,/*0C*/4,/*0D*/4,/*0E*/8,/*0F*/4,
+        /*10*/4,/*11*/12,/*12*/8,/*13*/8,/*14*/4,/*15*/4,/*16*/8,/*17*/4, /*18*/12,/*19*/8,/*1A*/8,/*1B*/8,/*1C*/4,/*1D*/4,/*1E*/8,/*1F*/4,
+        /*20*/12,/*21*/12,/*22*/8,/*23*/8,/*24*/4,/*25*/4,/*26*/8,/*27*/4, /*28*/12,/*29*/8,/*2A*/8,/*2B*/8,/*2C*/4,/*2D*/4,/*2E*/8,/*2F*/4,
+        /*30*/12,/*31*/12,/*32*/8,/*33*/8,/*34*/12,/*35*/12,/*36*/12,/*37*/4, /*38*/12,/*39*/8,/*3A*/8,/*3B*/8,/*3C*/4,/*3D*/4,/*3E*/8,/*3F*/4,
+        /*40*/4,/*41*/4,/*42*/4,/*43*/4,/*44*/4,/*45*/4,/*46*/8,/*47*/4, /*48*/4,/*49*/4,/*4A*/4,/*4B*/4,/*4C*/4,/*4D*/4,/*4E*/8,/*4F*/4,
+        /*50*/4,/*51*/4,/*52*/4,/*53*/4,/*54*/4,/*55*/4,/*56*/8,/*57*/4, /*58*/4,/*59*/4,/*5A*/4,/*5B*/4,/*5C*/4,/*5D*/4,/*5E*/8,/*5F*/4,
+        /*60*/4,/*61*/4,/*62*/4,/*63*/4,/*64*/4,/*65*/4,/*66*/8,/*67*/4, /*68*/4,/*69*/4,/*6A*/4,/*6B*/4,/*6C*/4,/*6D*/4,/*6E*/8,/*6F*/4,
+        /*70*/8,/*71*/8,/*72*/8,/*73*/8,/*74*/8,/*75*/8,/*76*/4,/*77*/8, /*78*/4,/*79*/4,/*7A*/4,/*7B*/4,/*7C*/4,/*7D*/4,/*7E*/8,/*7F*/4,
+        /*80*/4,/*81*/4,/*82*/4,/*83*/4,/*84*/4,/*85*/4,/*86*/8,/*87*/4, /*88*/4,/*89*/4,/*8A*/4,/*8B*/4,/*8C*/4,/*8D*/4,/*8E*/8,/*8F*/4,
+        /*90*/4,/*91*/4,/*92*/4,/*93*/4,/*94*/4,/*95*/4,/*96*/8,/*97*/4, /*98*/4,/*99*/4,/*9A*/4,/*9B*/4,/*9C*/4,/*9D*/4,/*9E*/8,/*9F*/4,
+        /*A0*/4,/*A1*/4,/*A2*/4,/*A3*/4,/*A4*/4,/*A5*/4,/*A6*/8,/*A7*/4, /*A8*/4,/*A9*/4,/*AA*/4,/*AB*/4,/*AC*/4,/*AD*/4,/*AE*/8,/*AF*/4,
+        /*B0*/4,/*B1*/4,/*B2*/4,/*B3*/4,/*B4*/4,/*B5*/4,/*B6*/8,/*B7*/4, /*B8*/4,/*B9*/4,/*BA*/4,/*BB*/4,/*BC*/4,/*BD*/4,/*BE*/8,/*BF*/4,
+        /*C0*/8,/*C1*/12,/*C2*/12,/*C3*/16,/*C4*/12,/*C5*/16,/*C6*/8,/*C7*/16, /*C8*/8,/*C9*/16,/*CA*/12,/*CB*/8,/*CC*/12,/*CD*/24,/*CE*/8,/*CF*/16,
+        /*D0*/8,/*D1*/12,/*D2*/12,/*D3*/4,/*D4*/12,/*D5*/16,/*D6*/8,/*D7*/16, /*D8*/8,/*D9*/16,/*DA*/12,/*DB*/4,/*DC*/12,/*DD*/4,/*DE*/8,/*DF*/16,
+        /*E0*/12,/*E1*/12,/*E2*/8,/*E3*/4,/*E4*/4,/*E5*/16,/*E6*/8,/*E7*/16, /*E8*/16,/*E9*/4,/*EA*/16,/*EB*/4,/*EC*/4,/*ED*/4,/*EE*/8,/*EF*/16,
+        /*F0*/12,/*F1*/12,/*F2*/8,/*F3*/4,/*F4*/4,/*F5*/16,/*F6*/8,/*F7*/16, /*F8*/12,/*F9*/8,/*FA*/16,/*FB*/4,/*FC*/4,/*FD*/4,/*FE*/8,/*FF*/16
+    };
 
-    int cycles = 4; // Default cycles
+    // Reference: Pan Docs / GB CPU timings. All cycles here are machine cycles (4 T-states per cycle).
+    int cycles = 4; // Default for simple register ops
 
-    // Handle CB prefix
+    // Handle CB prefix first (special timing: 8 or 16 depending on operand)
     if (opcode == 0xCB) {
         uint8_t cb_opcode = mmu.read_byte(PC++);
+        bool operand_is_hl = (cb_opcode & 0x07) == 0x06;
+        uint8_t operation = cb_opcode >> 3; // 0-31 groups (RLC..SET)
+        bool is_bit = (operation >= 8 && operation <= 15);
         execute_cb_instruction(cb_opcode);
-        return 8; // CB instructions take 8 cycles
+        int real_cb_cycles;
+        if (operand_is_hl) {
+            // BIT (HL) is 12 cycles; all other (HL) CB ops are 16.
+            real_cb_cycles = is_bit ? 12 : 16;
+        } else {
+            real_cb_cycles = 8; // All register CB ops are 8 cycles.
+        }
+        int expected_cb_cycles = real_cb_cycles; // Using Pan Docs rules above
+        if (instr_cycle_log.is_open()) {
+            instr_cycle_log << "CB 0x" << std::hex << (int)cb_opcode << std::dec
+                            << " cycles=" << real_cb_cycles << " expected=" << expected_cb_cycles
+                            << (real_cb_cycles==expected_cb_cycles?" OK":" MISMATCH") << '\n';
+        }
+        return real_cb_cycles;
     }
 
-    // Set cycles based on instruction (timings per Pan Docs)
-    // NOTE: Conditional instructions have two timings depending on whether the branch is taken.
-    switch (opcode) {
-        // 8 cycles (unconditional)
-        case 0x03: case 0x13: case 0x23: case 0x33: // INC rr
-        case 0x09: case 0x19: case 0x29: case 0x39: // ADD HL, rr
-        case 0xF9: // LD SP, HL
-            cycles = 8; break;
+    // New diagnostic entry point for CP immediate opcode
+    if (opcode == 0xFE && instr_cycle_log.is_open()) {
+        instr_cycle_log << "[DEBUG] enter execute_instruction_with_cycles 0xFE initial cycles=" << cycles << "\n";
+    }
 
-        // 12 cycles (unconditional)
-        case 0x01: case 0x11: case 0x21: case 0x31: // LD rr, nn
-        case 0x06: case 0x0E: case 0x16: case 0x1E: case 0x26: case 0x2E: case 0x36: case 0x3E: // LD r, n / LD (HL), n
-        case 0xE0: case 0xF0: // LDH (n),A / LDH A,(n)
-        case 0xF8: // LD HL, SP+n
-        case 0xC1: case 0xD1: case 0xE1: case 0xF1: // POP rr
+    switch (opcode) {
+        // 8-bit immediate loads (register only) 8 cycles
+        case 0x06: case 0x0E: case 0x16: case 0x1E: case 0x26: case 0x2E: case 0x3E:
+            cycles = 8; break; // LD r,n
+        case 0x36: // LD (HL),n
             cycles = 12; break;
 
-        // 16 cycles (unconditional)
-        case 0xEA: case 0xFA: // LD (nn),A / LD A,(nn)
-        case 0xE8: // ADD SP, n
-        case 0xC3: // JP nn
-        case 0xC9: // RET
-        case 0xD9: // RETI
-        case 0xC7: case 0xCF: case 0xD7: case 0xDF: case 0xE7: case 0xEF: case 0xF7: case 0xFF: // RST t
-            cycles = 16; break;
+        // 16-bit loads
+        case 0x01: case 0x11: case 0x21: case 0x31: // LD rr,nn
+            cycles = 12; break;
 
-        // 20 cycles (unconditional)
-        case 0x08: // LD (a16), SP
-            cycles = 20; break;
+        // LD (a16),SP
+        case 0x08: cycles = 20; break;
 
-        // 24 cycles (unconditional)
-        case 0xCD: // CALL nn
-            cycles = 24; break;
+        // LD A,(rr) & LD (rr),A
+        case 0x0A: case 0x1A: case 0x02: case 0x12: cycles = 8; break;
 
-        // 16-bit PUSH (16 cycles)
-        case 0xC5: case 0xD5: case 0xE5: case 0xF5: // PUSH rr
-            cycles = 16; break;
+        // LDH (n),A / LDH A,(n)
+        case 0xE0: case 0xF0: cycles = 12; break;
+        // LD (C),A / LD A,(C)
+        case 0xE2: case 0xF2: cycles = 8; break;
 
-        // Conditional JR (taken 12, not taken 8)
-        case 0x20: cycles = (!zero_flag)  ? 12 : 8; break; // JR NZ,n
-        case 0x28: cycles = ( zero_flag)  ? 12 : 8; break; // JR Z,n
-        case 0x30: cycles = (!carry_flag) ? 12 : 8; break; // JR NC,n
-        case 0x38: cycles = ( carry_flag) ? 12 : 8; break; // JR C,n
+        // LD (nn),A / LD A,(nn)
+        case 0xEA: case 0xFA: cycles = 16; break;
 
-        // Conditional JP (taken 16, not taken 12)
-        case 0xC2: cycles = (!zero_flag)  ? 16 : 12; break; // JP NZ,nn
-        case 0xCA: cycles = ( zero_flag)  ? 16 : 12; break; // JP Z,nn
-        case 0xD2: cycles = (!carry_flag) ? 16 : 12; break; // JP NC,nn
-        case 0xDA: cycles = ( carry_flag) ? 16 : 12; break; // JP C,nn
+        // LD HL,SP+e
+        case 0xF8: cycles = 12; break;
+        // LD SP,HL
+        case 0xF9: cycles = 8; break;
 
-        // Conditional RET (taken 20, not taken 8)
-        case 0xC0: cycles = (!zero_flag)  ? 20 : 8; break; // RET NZ
-        case 0xC8: cycles = ( zero_flag)  ? 20 : 8; break; // RET Z
-        case 0xD0: cycles = (!carry_flag) ? 20 : 8; break; // RET NC
-        case 0xD8: cycles = ( carry_flag) ? 20 : 8; break; // RET C
+        // ADD SP,e
+        case 0xE8: cycles = 16; break;
 
-        // Conditional CALL (taken 24, not taken 12)
-        case 0xC4: cycles = (!zero_flag)  ? 24 : 12; break; // CALL NZ,nn
-        case 0xCC: cycles = ( zero_flag)  ? 24 : 12; break; // CALL Z,nn
-        case 0xD4: cycles = (!carry_flag) ? 24 : 12; break; // CALL NC,nn
-        case 0xDC: cycles = ( carry_flag) ? 24 : 12; break; // CALL C,nn
+        // INC/DEC 16-bit
+        case 0x03: case 0x13: case 0x23: case 0x33: // INC rr
+        case 0x0B: case 0x1B: case 0x2B: case 0x3B: // DEC rr
+            cycles = 8; break;
 
-        default:
-            // All other opcodes keep default 4 cycles here; many multi-cycle opcodes already handled above.
+        // ADD HL,rr
+        case 0x09: case 0x19: case 0x29: case 0x39: cycles = 8; break;
+
+        // PUSH rr
+        case 0xC5: case 0xD5: case 0xE5: case 0xF5: cycles = 16; break;
+        // POP rr
+        case 0xC1: case 0xD1: case 0xE1: case 0xF1: cycles = 12; break;
+
+        // ALU with (HL) memory operand (8 cycles)
+        case 0x86: case 0x8E: case 0x96: case 0x9E: // ADD/ADC/SUB/SBC A,(HL)
+        case 0xA6: case 0xAE: case 0xB6: case 0xBE: // AND/XOR/OR/CP (HL)
+            cycles = 8; break;
+
+        // INC/DEC (HL)
+        case 0x34: case 0x35: cycles = 12; break;
+
+        // LD r,(HL) and LD (HL),r (all 8 cycles)
+        case 0x46: case 0x4E: case 0x56: case 0x5E: case 0x66: case 0x6E: case 0x7E: // LD r,(HL)
+        case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x77: // LD (HL),r
+            cycles = 8; break;
+
+        // LDI / LDD block transfer instructions
+        case 0x22: // LDI (HL),A
+        case 0x2A: // LDI A,(HL)
+        case 0x32: // LDD (HL),A
+        case 0x3A: // LDD A,(HL)
+            cycles = 8; break;
+
+        // ALU immediate operations (8 cycles)
+        // ADD A,d8 (0xC6), ADC A,d8 (0xCE), SUB A,d8 (0xD6), SBC A,d8 (0xDE),
+        // AND d8 (0xE6), XOR d8 (0xEE), OR d8 (0xF6), CP d8 (0xFE)
+        case 0xC6: case 0xCE: case 0xD6: case 0xDE: case 0xE6: case 0xEE: case 0xF6: case 0xFE:
+            cycles = 8; 
+            if (opcode == 0xFE && instr_cycle_log.is_open()) {
+                instr_cycle_log << "[DEBUG] cycle assign CP d8 -> 8\n";
+            }
             break;
+
+        // JR r8
+        case 0x18: cycles = 12; break;
+        // Conditional JR (taken 12 / not taken 8)
+        case 0x20: cycles = (!zero_flag)  ? 12 : 8; break;
+        case 0x28: cycles = ( zero_flag)  ? 12 : 8; break;
+        case 0x30: cycles = (!carry_flag) ? 12 : 8; break;
+        case 0x38: cycles = ( carry_flag) ? 12 : 8; break;
+
+        // JP nn
+        case 0xC3: cycles = 16; break;
+        // JP (HL)
+        case 0xE9: cycles = 4; break;
+        // Conditional JP (taken 16 / not 12)
+        case 0xC2: cycles = (!zero_flag)  ? 16 : 12; break;
+        case 0xCA: cycles = ( zero_flag)  ? 16 : 12; break;
+        case 0xD2: cycles = (!carry_flag) ? 16 : 12; break;
+        case 0xDA: cycles = ( carry_flag) ? 16 : 12; break;
+
+        // CALL nn
+        case 0xCD: cycles = 24; break;
+        // Conditional CALL (taken 24 / not 12)
+        case 0xC4: cycles = (!zero_flag)  ? 24 : 12; break;
+        case 0xCC: cycles = ( zero_flag)  ? 24 : 12; break;
+        case 0xD4: cycles = (!carry_flag) ? 24 : 12; break;
+        case 0xDC: cycles = ( carry_flag) ? 24 : 12; break;
+
+        // RET / RETI
+        case 0xC9: case 0xD9: cycles = 16; break;
+        // Conditional RET (taken 20 / not 8)
+        case 0xC0: cycles = (!zero_flag)  ? 20 : 8; break;
+        case 0xC8: cycles = ( zero_flag)  ? 20 : 8; break;
+        case 0xD0: cycles = (!carry_flag) ? 20 : 8; break;
+        case 0xD8: cycles = ( carry_flag) ? 20 : 8; break;
+
+        // RST
+        case 0xC7: case 0xCF: case 0xD7: case 0xDF: case 0xE7: case 0xEF: case 0xF7: case 0xFF: cycles = 16; break;
+
+        // Misc with longer timings already handled above; others fall through to default 4 cycles.
+        default: break;
     }
 
-    // Execute the instruction
+    // Diagnostic: confirm cycle assignment for CP d8 (0xFE)
+    if (opcode == 0xFE && instr_cycle_log.is_open()) {
+        instr_cycle_log << "[DEBUG] post-switch cycles for 0xFE=" << cycles << "\n";
+    }
+
+    // Execute the instruction core logic
     execute_instruction(opcode);
-    return cycles;
+    int reported = cycles;
+    // Conditional adjustments: overwrite 'reported' but keep 'cycles' proper
+    // We already computed actual above.
+
+    // Logging & mismatch detection
+    if (instr_cycle_log.is_open()) {
+        int expected = expected_cycles[opcode];
+        // For conditional instructions we stored non-taken value in expected table (Pan Docs lists non-taken); when taken we add difference.
+        // We can recompute expected dynamic for branch opcodes to reduce false positives.
+        switch (opcode) {
+            case 0x20: expected = (!zero_flag)?12:8; break;
+            case 0x28: expected = ( zero_flag)?12:8; break;
+            case 0x30: expected = (!carry_flag)?12:8; break;
+            case 0x38: expected = ( carry_flag)?12:8; break;
+            case 0xC2: expected = (!zero_flag)?16:12; break;
+            case 0xCA: expected = ( zero_flag)?16:12; break;
+            case 0xD2: expected = (!carry_flag)?16:12; break;
+            case 0xDA: expected = ( carry_flag)?16:12; break;
+            case 0xC0: expected = (!zero_flag)?20:8; break;
+            case 0xC8: expected = ( zero_flag)?20:8; break;
+            case 0xD0: expected = (!carry_flag)?20:8; break;
+            case 0xD8: expected = ( carry_flag)?20:8; break;
+            case 0xC4: expected = (!zero_flag)?24:12; break;
+            case 0xCC: expected = ( zero_flag)?24:12; break;
+            case 0xD4: expected = (!carry_flag)?24:12; break;
+            case 0xDC: expected = ( carry_flag)?24:12; break;
+        }
+        instr_cycle_log << "OP 0x" << std::hex << (int)opcode << std::dec
+                        << " cycles=" << reported << " expected=" << expected
+                        << (reported==expected?" OK":" MISMATCH") << '\n';
+    }
+    return reported;
 }

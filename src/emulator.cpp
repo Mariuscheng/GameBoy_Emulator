@@ -1,8 +1,14 @@
 #include "emulator.h"
 #include <iostream>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <fstream>
+#ifndef EMU_FRAME_DEBUG
+#define EMU_FRAME_DEBUG 0
+#endif
 
-Emulator::Emulator() : cpu(mmu), window(nullptr), renderer(nullptr), texture(nullptr), audio_stream(nullptr), running(false) {
+Emulator::Emulator() : cpu(mmu), window(nullptr), renderer(nullptr), texture(nullptr), audio_stream(nullptr), running(false), headless(false) {
 }
 
 Emulator::~Emulator() {
@@ -10,64 +16,88 @@ Emulator::~Emulator() {
 }
 
 bool Emulator::initialize() {
-    // Initialize SDL
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
-        std::cout << "SDL_Init Error: " << SDL_GetError() << std::endl;
-        return false;
+    // Initialize SDL (SDL_Init returns 0 on success, negative on failure)
+    // 僅允許SDL初始化成功才繼續，否則直接失敗
+    // 啟動前自動檢查並嘗試複製SDL3.dll等必要檔案
+#ifdef _WIN32
+    const char* dlls[] = {"SDL3.dll", "SDL3_image.dll", "SDL3_ttf.dll"};
+    const char* searchPaths[] = {
+        "C:/vcpkg/installed/x64-windows/bin/",
+        "C:/SDL3/bin/",
+        "C:/msys64/mingw64/bin/"
+    };
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string exeDir = std::string(exePath);
+    exeDir = exeDir.substr(0, exeDir.find_last_of("/\\")) + "/";
+    for (const char* dll : dlls) {
+        std::string target = exeDir + dll;
+        std::ifstream f(target);
+        if (!f.good()) {
+            bool copied = false;
+            for (const char* srcDir : searchPaths) {
+                std::string src = std::string(srcDir) + dll;
+                std::ifstream fs(src, std::ios::binary);
+                if (fs.good()) {
+                    std::ofstream ft(target, std::ios::binary);
+                    ft << fs.rdbuf();
+                    std::cout << "[AutoFix] Copied " << dll << " from " << srcDir << std::endl;
+                    copied = true;
+                    break;
+                }
+            }
+            if (!copied) {
+                std::cout << "[AutoFix] Missing " << dll << ", please copy it to " << exeDir << std::endl;
+            }
+        }
     }
-    std::cout << "SDL initialized successfully" << std::endl;
-
-    // Create window (GameBoy resolution: 160x144, scaled up)
-    window = SDL_CreateWindow("GameBoy Emulator", 160 * 3, 144 * 3, SDL_WINDOW_RESIZABLE);
-    if (!window) {
-        std::cout << "SDL_CreateWindow Error: " << SDL_GetError() << std::endl;
-        SDL_Quit();
-        return false;
-    }
-    std::cout << "Window created successfully - showing window..." << std::endl;
-    SDL_ShowWindow(window);
-    std::cout << "Window shown" << std::endl;
-
-    // Create renderer
-    renderer = SDL_CreateRenderer(window, nullptr);
-    if (!renderer) {
-        std::cout << "SDL_CreateRenderer Error: " << SDL_GetError() << std::endl;
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return false;
-    }
-
-    // Create texture for rendering
-    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, 160, 144);
-    if (!texture) {
-        std::cout << "SDL_CreateTexture Error: " << SDL_GetError() << std::endl;
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return false;
-    }
-
-    // Audio initialization
-    SDL_AudioSpec desired_spec;
-    SDL_zero(desired_spec);
-    desired_spec.freq = 44100;
-    desired_spec.format = SDL_AUDIO_F32;
-    desired_spec.channels = 2;
-
-    audio_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired_spec, nullptr, nullptr);
-    if (!audio_stream) {
-        std::cout << "SDL_OpenAudioDeviceStream Error: " << SDL_GetError() << std::endl;
-        SDL_DestroyTexture(texture);
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
+#endif
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) == 0) {
+        std::cout << "[Init] SDL initialized successfully (video+audio)" << std::endl;
+    } else {
+        std::string sdl_err = SDL_GetError();
+        std::cout << "[Init] SDL_Init VIDEO|AUDIO failed: " << sdl_err << std::endl;
+        std::cout << "[ERROR] SDL could not be initialized. Please ensure SDL3.dll is present in the executable directory." << std::endl;
+#ifdef _WIN32
+        std::cout << "[HINT] On Windows, place SDL3.dll, SDL3_image.dll, SDL3_ttf.dll in the same folder as GameBoy.exe." << std::endl;
+#endif
         return false;
     }
 
-    // Get the audio device from the stream and resume it
-    SDL_AudioDeviceID device = SDL_GetAudioStreamDevice(audio_stream);
-    SDL_ResumeAudioDevice(device);
-    std::cout << "Audio initialized successfully" << std::endl;
+    if (!headless) {
+        // Create window (GameBoy resolution: 160x144, scaled up)
+        window = SDL_CreateWindow("GameBoy Emulator", 160 * 3, 144 * 3, SDL_WINDOW_RESIZABLE);
+        if (!window) {
+            std::cout << "[Init] SDL_CreateWindow failed: " << SDL_GetError() << std::endl;
+            SDL_Quit();
+            return false;
+        }
+        std::cout << "[Init] Window created successfully - showing window..." << std::endl;
+        SDL_ShowWindow(window);
+        std::cout << "[Init] Window shown" << std::endl;
+
+        // Create renderer
+        renderer = SDL_CreateRenderer(window, nullptr);
+        if (!renderer) {
+            std::cout << "[Init] SDL_CreateRenderer failed: " << SDL_GetError() << std::endl;
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return false;
+        }
+
+        // Create texture for rendering
+        texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, 160, 144);
+        if (!texture) {
+            std::cout << "[Init] SDL_CreateTexture failed: " << SDL_GetError() << std::endl;
+            SDL_DestroyRenderer(renderer);
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return false;
+        }
+    }
+
+    // Audio initialization (disabled for now)
+    audio_stream = nullptr;
 
     // Initialize CPU and MMU
     cpu.reset();
@@ -104,27 +134,30 @@ bool Emulator::load_rom(const std::string& rom_path) {
 }
 
 void Emulator::run() {
+    // Basic start banner (can disable with EMU_FRAME_DEBUG if desired)
+#ifndef EMU_FRAME_DEBUG
+    // Minimal banner only once
+    std::cout << "Emulator starting..." << std::endl;
+#else
     std::cout << "=== EMULATOR RUN STARTED ===" << std::endl;
-    std::cout.flush();
     std::cout << "Starting emulator main loop..." << std::endl;
-    std::cout.flush();
     std::cout << "Window pointer: " << window << std::endl;
-    std::cout.flush();
     std::cout << "Running flag: " << running << std::endl;
-    std::cout.flush();
+#endif
     int frame_count = 0;
     
     std::cout << "About to enter main loop, running=" << running << std::endl;
     std::cout.flush();
     while (running) {
         frame_count++;
+    #if EMU_FRAME_DEBUG
         std::cout << ">>> FRAME " << frame_count << " START <<<" << std::endl;
-        std::cout.flush();
+    #endif
         
-        if (window) {
-            // Graphics mode
+        if (!headless) {
+    #if EMU_FRAME_DEBUG
             std::cout << "FRAME " << frame_count << ": Graphics mode - window exists" << std::endl;
-            std::cout.flush();
+    #endif
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
                 handle_input(event);
@@ -135,8 +168,10 @@ void Emulator::run() {
 
             // Update texture with PPU framebuffer
             const auto& framebuffer = mmu.get_ppu().get_framebuffer();
+            
+#if EMU_FRAME_DEBUG
             std::cout << "FRAME " << frame_count << ": Got framebuffer, size=" << framebuffer.size() << std::endl;
-            std::cout.flush();
+#endif
             SDL_UpdateTexture(texture, nullptr, framebuffer.data(), 160 * sizeof(uint32_t));
 
             // Clear screen
@@ -148,13 +183,17 @@ void Emulator::run() {
 
             // Present
             SDL_RenderPresent(renderer);
+            
+#if EMU_FRAME_DEBUG
             std::cout << "FRAME " << frame_count << ": Graphics rendered and presented" << std::endl;
-            std::cout.flush();
+#endif
         } else {
             // Headless mode - just run CPU
+            
+#if EMU_FRAME_DEBUG
             std::cout << "FRAME " << frame_count << ": Headless mode - no window" << std::endl;
-            std::cout.flush();
-            SDL_Delay(16); // ~60 FPS
+#endif
+            // No delay in headless mode to run as fast as possible
         }
 
         // Execute CPU instructions and update PPU and APU
@@ -169,8 +208,10 @@ void Emulator::run() {
             SDL_PutAudioStreamData(audio_stream, audio_buffer.data(), audio_buffer.size() * sizeof(float));
         }
 
+        
+    #if EMU_FRAME_DEBUG
         std::cout << "FRAME " << frame_count << ": About to execute CPU cycles" << std::endl;
-        std::cout.flush();
+    #endif
         int halt_cycles = 0;
         int loop_count = 0;
         while (total_cycles < target_cycles) {
@@ -184,20 +225,45 @@ void Emulator::run() {
                     std::cout << "[Emulator] CPU halted at total=" << total_cycles << ", forcing 4 cycles" << std::endl;
                 }
             }
-            if (loop_count <= 100 || loop_count % 10000 == 0) {
-                std::cout << "[Emulator loop " << loop_count << "] CPU returned " << cycles << " cycles, total=" << total_cycles << std::endl;
-            }
+            // Verbose per-instruction loop debug removed (was printing first 100 and every 10000 loops)
+            // If needed for future diagnostics, wrap similar code with a macro EMU_LOOP_DEBUG.
             total_cycles += cycles;
             mmu.get_ppu().step(cycles, mmu);
             mmu.get_apu().step(cycles);
         }
+        
+    #if EMU_FRAME_DEBUG
         std::cout << "FRAME " << frame_count << ": CPU execution complete, total_cycles=" << total_cycles << ", loop_count=" << loop_count << std::endl;
-        std::cout.flush();
+    #endif
+        if (frame_count % 60 == 0) { // Every ~1 second of emulated time
+    #if EMU_FRAME_DEBUG
+            std::cout << "[CPU HALT STATS] frame=" << frame_count
+                  << " halt_count=" << cpu.halt_count
+                  << " halt_bug_count=" << cpu.halt_bug_count << std::endl;
+    #endif
+        }
+    #if EMU_FRAME_DEBUG
         std::cout << ">>> FRAME " << frame_count << " END <<<" << std::endl;
-        std::cout.flush();
+    #endif
+
+        // Optional frame limit to assist automated testing
+        if (max_frames > 0 && frame_count >= max_frames) {
+            // Try saving a screenshot before exiting
+            const char* out = "frame_end.ppm";
+            if (save_framebuffer_ppm(out)) {
+                std::cout << "[SCREENSHOT] Saved framebuffer to " << out << std::endl;
+            } else {
+                std::cout << "[SCREENSHOT] Failed to save framebuffer" << std::endl;
+            }
+            running = false;
+        }
     }
-    std::cout << "=== EMULATOR RUN ENDED ===" << std::endl;
-    std::cout.flush();
+    
+    #if EMU_FRAME_DEBUG
+        std::cout << "=== EMULATOR RUN ENDED ===" << std::endl;
+    #endif
+    // 執行 LCDC ON 事件摘要輸出 (#3)
+    mmu.get_ppu().dump_lcd_on_summary();
 }
 
 void Emulator::shutdown() {
@@ -217,7 +283,9 @@ void Emulator::shutdown() {
         SDL_DestroyWindow(window);
         window = nullptr;
     }
-    SDL_Quit();
+    if (!headless) {
+        SDL_Quit();
+    }
 }
 
 void Emulator::handle_input(const SDL_Event& event) {
@@ -242,4 +310,36 @@ void Emulator::handle_input(const SDL_Event& event) {
             mmu.write_byte(0xFF0F, iflag);
         }
     }
+}
+
+void Emulator::set_ppu_lcd_start_offset(uint16_t offset) {
+    mmu.get_ppu().set_lcd_start_cycle_offset(offset);
+    std::cout << "[Emulator] Set PPU lcd_start_cycle_offset=" << offset << std::endl;
+}
+
+bool Emulator::save_framebuffer_ppm(const std::string& path) const {
+    // Dump current PPU framebuffer (RGBA32) to a binary PPM (P6, RGB)
+    const auto& fb = mmu.get_ppu().get_framebuffer();
+    const int width = 160;
+    const int height = 144;
+    FILE* f = nullptr;
+#ifdef _WIN32
+    fopen_s(&f, path.c_str(), "wb");
+#else
+    f = fopen(path.c_str(), "wb");
+#endif
+    if (!f) return false;
+    // Header
+    fprintf(f, "P6\n%d %d\n255\n", width, height);
+    // Pixels
+    for (int i = 0; i < width * height; ++i) {
+        uint32_t p = fb[i];
+        unsigned char r = (unsigned char)((p >> 16) & 0xFF);
+        unsigned char g = (unsigned char)((p >> 8) & 0xFF);
+        unsigned char b = (unsigned char)(p & 0xFF);
+        unsigned char rgb[3] = { r, g, b };
+        fwrite(rgb, 1, 3, f);
+    }
+    fclose(f);
+    return true;
 }

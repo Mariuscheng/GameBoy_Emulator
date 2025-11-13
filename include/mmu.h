@@ -32,6 +32,9 @@ public:
 
     // PPU access
     PPU& get_ppu() { return ppu; }
+    const PPU& get_ppu() const { return ppu; }
+    // PPU 專用讀取：在 Mode2/3 期間也允許讀 VRAM/OAM（僅限 PPU 自身使用）
+    uint8_t ppu_read(uint16_t address);
 
     // APU access
     APU& get_apu() { return apu; }
@@ -144,6 +147,13 @@ private:
     uint8_t get_mbc_rom_bank(uint16_t address) const;
     uint8_t get_mbc_ram_bank(uint16_t address) const;
     uint16_t get_mbc_ram_address(uint16_t address) const;
+
+    // --- OAM bug emulation state ---
+    // Simplified model: when CPU writes to OAM during PPU mode 2/3, hardware bus
+    // contention corrupts target bytes by duplicating the previous 2-byte pair.
+    // We track last successfully written (unrestricted) OAM 2-byte pair start.
+    uint16_t oam_bug_last_pair_base = 0xFE00; // start of last 2-byte pair
+    bool oam_bug_last_valid = false;
 };
 
 #endif // MMU_H
