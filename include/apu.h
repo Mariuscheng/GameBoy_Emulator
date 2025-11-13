@@ -10,7 +10,7 @@ public:
     APU();
     ~APU();
 
-    void step(uint8_t cycles);
+    void step(int cycles);
     void reset();
 
     // Register access

@@ -13,7 +13,8 @@ void CPU::sub(uint8_t value) {
     uint16_t result = A - value;
     zero_flag = ((result & 0xFF) == 0);
     subtract_flag = true;
-    half_carry_flag = ((A & 0xF) < (value & 0xF)); // borrow from bit 4
+    // H flag: set if borrow from bit 4 (lower nibble underflows)
+    half_carry_flag = (A & 0x0F) < (value & 0x0F);
     carry_flag = (A < value); // borrow from bit 8
     A = static_cast<uint8_t>(result);
 }
@@ -57,8 +58,12 @@ void CPU::sbc(uint8_t value) {
     uint16_t result = A - value - carry;
     zero_flag = ((result & 0xFF) == 0);
     subtract_flag = true;
-    half_carry_flag = ((A & 0xF) < ((value & 0xF) + carry)); // borrow from bit 4
-    carry_flag = (A < (value + carry)); // borrow from bit 8
+    // H flag: set if borrow from bit 4 (lower nibble underflows)
+    // Borrow occurs if (A & 0x0F) < ((value & 0x0F) + carry)
+    uint16_t a_low = A & 0x0F;
+    uint16_t v_low = value & 0x0F;
+    half_carry_flag = (a_low < (v_low + carry));
+    carry_flag = ((uint16_t)A < (uint16_t)value + (uint16_t)carry);
     A = static_cast<uint8_t>(result);
 }
 
@@ -67,7 +72,8 @@ void CPU::cp(uint8_t value) {
     uint16_t result = A - value;
     zero_flag = ((result & 0xFF) == 0);
     subtract_flag = true;
-    half_carry_flag = ((A & 0xF) < (value & 0xF)); // borrow from bit 4
+    // H flag: set if borrow from bit 4 (lower nibble underflows)
+    half_carry_flag = (A & 0x0F) < (value & 0x0F);
     carry_flag = (A < value); // borrow from bit 8
     // A is not modified
 }
@@ -85,7 +91,8 @@ void CPU::dec(uint8_t& reg) {
     reg--;
     zero_flag = (reg == 0);
     subtract_flag = true;
-    half_carry_flag = ((old & 0xF) == 0); // set if borrow from bit 4
+    // H flag: set if borrow from bit 4 when decrementing
+    half_carry_flag = ((old & 0x0F) == 0); // H is set if lower nibble was 0 (requires borrow)
 }
 
 void CPU::add_hl(uint16_t value) {

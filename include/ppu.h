@@ -11,8 +11,8 @@ public:
     PPU();
     ~PPU();
 
-    void step(uint8_t cycles, MMU& mmu);
-    void render_scanline(MMU& mmu);
+        void step(int cycles, MMU& mmu);
+        void render_scanline(MMU& mmu, uint8_t shadow_scx, uint8_t shadow_scy);
     const std::array<uint32_t, 160 * 144>& get_framebuffer() const { return framebuffer; }
 
     // LCD Control Register (0xFF40)
@@ -54,6 +54,8 @@ public:
 private:
     // Framebuffer (160x144 pixels, 32-bit color)
     std::array<uint32_t, 160 * 144> framebuffer;
+    // Raw background/window pixel color IDs (0..3) for priority checks
+    std::array<uint8_t, 160 * 144> bgwin_pixel_ids;
 
     // LCD registers
     uint8_t lcdc; // LCD Control
@@ -67,13 +69,19 @@ private:
 
     // Timing
     uint16_t cycle_count;
+    // Current PPU mode: 0=HBlank, 1=VBlank, 2=OAM, 3=Transfer
+    uint8_t ppu_mode;
+    // Shadow registers for timing-accurate rendering
+    uint8_t shadow_scx, shadow_scy;
+    // One-time debug print flag
+    bool frame_info_printed = false;
 
     // Helper functions
     uint32_t get_color(uint8_t color_id, uint8_t palette) const;
-    void render_background(MMU& mmu);
-    void render_window(MMU& mmu);
+    void render_background(MMU& mmu, uint8_t shadow_scx, uint8_t shadow_scy);
+    void render_window(MMU& mmu, uint8_t shadow_scx, uint8_t shadow_scy);
     void render_sprites(MMU& mmu);
     uint8_t get_tile_pixel(MMU& mmu, uint16_t tile_addr, uint8_t x, uint8_t y) const;
 };
 
-#endif // PPU_H#endif // PPU_H
+#endif // PPU_H

@@ -24,7 +24,9 @@ bool Emulator::initialize() {
         SDL_Quit();
         return false;
     }
-    std::cout << "Window created successfully" << std::endl;
+    std::cout << "Window created successfully - showing window..." << std::endl;
+    SDL_ShowWindow(window);
+    std::cout << "Window shown" << std::endl;
 
     // Create renderer
     renderer = SDL_CreateRenderer(window, nullptr);
@@ -62,13 +64,15 @@ bool Emulator::initialize() {
         return false;
     }
 
-    // Start audio playback
-    SDL_ResumeAudioDevice(SDL_GetAudioStreamDevice(audio_stream));
+    // Get the audio device from the stream and resume it
+    SDL_AudioDeviceID device = SDL_GetAudioStreamDevice(audio_stream);
+    SDL_ResumeAudioDevice(device);
     std::cout << "Audio initialized successfully" << std::endl;
 
     // Initialize CPU and MMU
     cpu.reset();
-    mmu.write_byte(0xFFFF, 0x1F); // Enable all interrupts (VBlank, LCD, Timer, Serial, Joypad)
+    // Don't enable interrupts here - let the ROM handle initialization
+    // mmu.write_byte(0xFFFF, 0x1F); // Enable all interrupts (VBlank, LCD, Timer, Serial, Joypad)
 
     running = true;
     return true;
@@ -100,9 +104,27 @@ bool Emulator::load_rom(const std::string& rom_path) {
 }
 
 void Emulator::run() {
+    std::cout << "=== EMULATOR RUN STARTED ===" << std::endl;
+    std::cout.flush();
+    std::cout << "Starting emulator main loop..." << std::endl;
+    std::cout.flush();
+    std::cout << "Window pointer: " << window << std::endl;
+    std::cout.flush();
+    std::cout << "Running flag: " << running << std::endl;
+    std::cout.flush();
+    int frame_count = 0;
+    
+    std::cout << "About to enter main loop, running=" << running << std::endl;
+    std::cout.flush();
     while (running) {
+        frame_count++;
+        std::cout << ">>> FRAME " << frame_count << " START <<<" << std::endl;
+        std::cout.flush();
+        
         if (window) {
             // Graphics mode
+            std::cout << "FRAME " << frame_count << ": Graphics mode - window exists" << std::endl;
+            std::cout.flush();
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
                 handle_input(event);
@@ -113,6 +135,8 @@ void Emulator::run() {
 
             // Update texture with PPU framebuffer
             const auto& framebuffer = mmu.get_ppu().get_framebuffer();
+            std::cout << "FRAME " << frame_count << ": Got framebuffer, size=" << framebuffer.size() << std::endl;
+            std::cout.flush();
             SDL_UpdateTexture(texture, nullptr, framebuffer.data(), 160 * sizeof(uint32_t));
 
             // Clear screen
@@ -124,8 +148,12 @@ void Emulator::run() {
 
             // Present
             SDL_RenderPresent(renderer);
+            std::cout << "FRAME " << frame_count << ": Graphics rendered and presented" << std::endl;
+            std::cout.flush();
         } else {
             // Headless mode - just run CPU
+            std::cout << "FRAME " << frame_count << ": Headless mode - no window" << std::endl;
+            std::cout.flush();
             SDL_Delay(16); // ~60 FPS
         }
 
@@ -141,21 +169,35 @@ void Emulator::run() {
             SDL_PutAudioStreamData(audio_stream, audio_buffer.data(), audio_buffer.size() * sizeof(float));
         }
 
+        std::cout << "FRAME " << frame_count << ": About to execute CPU cycles" << std::endl;
+        std::cout.flush();
+        int halt_cycles = 0;
+        int loop_count = 0;
         while (total_cycles < target_cycles) {
+            loop_count++;
             int cycles = cpu.step();
+            // If CPU is halted (returns 0), still need to advance PPU/APU
+            if (cycles == 0) {
+                cycles = 4; // 1 M-cycle minimum
+                halt_cycles++;
+                if (halt_cycles <= 50) {
+                    std::cout << "[Emulator] CPU halted at total=" << total_cycles << ", forcing 4 cycles" << std::endl;
+                }
+            }
+            if (loop_count <= 100 || loop_count % 10000 == 0) {
+                std::cout << "[Emulator loop " << loop_count << "] CPU returned " << cycles << " cycles, total=" << total_cycles << std::endl;
+            }
             total_cycles += cycles;
             mmu.get_ppu().step(cycles, mmu);
             mmu.get_apu().step(cycles);
         }
-
-        // Exit after some time in headless mode
-        if (!window) {
-            static int counter = 0;
-            if (++counter > 20000) { // Run for about 20000 frames (~5-6 minutes for test ROMs)
-                running = false;
-            }
-        }
+        std::cout << "FRAME " << frame_count << ": CPU execution complete, total_cycles=" << total_cycles << ", loop_count=" << loop_count << std::endl;
+        std::cout.flush();
+        std::cout << ">>> FRAME " << frame_count << " END <<<" << std::endl;
+        std::cout.flush();
     }
+    std::cout << "=== EMULATOR RUN ENDED ===" << std::endl;
+    std::cout.flush();
 }
 
 void Emulator::shutdown() {

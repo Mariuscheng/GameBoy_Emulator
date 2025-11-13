@@ -56,6 +56,10 @@ public:
 
     // CPU state
     bool halted;
+    bool just_woken_from_halt; // Flag to handle HALT bug interrupt processing
+
+    // Debug counter
+    uint64_t step_count;
 
     // Methods
     void reset();

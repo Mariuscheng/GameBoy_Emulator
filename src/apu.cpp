@@ -15,9 +15,16 @@ void APU::reset() {
     ch2 = {};
     ch3 = {};
     ch4 = {};
-    nr50 = 0;
-    nr51 = 0;
-    nr52 = 0;
+    
+    // Initialize sound control registers to reasonable defaults
+    // NR50: Master volume - set left and right volume to max (bits 4-6 and 0-2)
+    nr50 = 0x77;  // Left volume: 7, Right volume: 7
+    
+    // NR51: Sound panning - enable all channels on both speakers
+    nr51 = 0xFF;  // All channels on left and right
+    
+    // NR52: Power control - enable APU
+    nr52 = 0x80;  // Bit 7 = 1 (APU enabled)
 
     // Initialize wave RAM to silence
     ch3.wave_ram.fill(0);
@@ -26,7 +33,7 @@ void APU::reset() {
     ch4.lfsr = 0x7FFF;
 }
 
-void APU::step(uint8_t cycles) {
+void APU::step(int cycles) {
     frame_counter += cycles;
 
     // Frame sequencer runs at 512Hz (8192 cycles per step)
@@ -174,7 +181,13 @@ void APU::write_register(uint16_t address, uint8_t value) {
                 ch2.position = 0;
             }
             break;
-        case 0xFF1A: ch3.dac_enabled = value; break;
+        case 0xFF1A: 
+            ch3.dac_enabled = value & 0x80; 
+            // If DAC is disabled, the channel is disabled
+            if (!ch3.dac_enabled) {
+                ch3.channel_enabled = false;
+            }
+            break;
         case 0xFF1B: ch3.length = value; break;
         case 0xFF1C:
             ch3.volume = value;
@@ -223,41 +236,48 @@ void APU::write_register(uint16_t address, uint8_t value) {
 }
 
 void APU::get_audio_samples(float* buffer, int length) {
+    // Generate audio samples based on current channel state
     for (int i = 0; i < length; i += 2) {
         float sample_left = 0.0f;
         float sample_right = 0.0f;
 
-        // Mix channels based on panning
+        // Mix channels based on panning (NR51)
         if (ch1.enabled) {
             float ch1_sample = generate_pulse_sample(ch1);
-            if (nr51 & 0x01) sample_right += ch1_sample;
-            if (nr51 & 0x10) sample_left += ch1_sample;
+            if (nr51 & 0x01) sample_right += ch1_sample;      // Channel 1 on right
+            if (nr51 & 0x10) sample_left += ch1_sample;       // Channel 1 on left
         }
 
         if (ch2.enabled) {
             float ch2_sample = generate_pulse_sample(ch2);
-            if (nr51 & 0x02) sample_right += ch2_sample;
-            if (nr51 & 0x20) sample_left += ch2_sample;
+            if (nr51 & 0x02) sample_right += ch2_sample;      // Channel 2 on right
+            if (nr51 & 0x20) sample_left += ch2_sample;       // Channel 2 on left
         }
 
-        if (ch3.channel_enabled) {
+        if (ch3.channel_enabled && (ch3.dac_enabled & 0x80)) {
             float ch3_sample = generate_wave_sample(ch3);
-            if (nr51 & 0x04) sample_right += ch3_sample;
-            if (nr51 & 0x40) sample_left += ch3_sample;
+            if (nr51 & 0x04) sample_right += ch3_sample;      // Channel 3 on right
+            if (nr51 & 0x40) sample_left += ch3_sample;       // Channel 3 on left
         }
 
         if (ch4.enabled) {
             float ch4_sample = generate_noise_sample(ch4);
-            if (nr51 & 0x08) sample_right += ch4_sample;
-            if (nr51 & 0x80) sample_left += ch4_sample;
+            if (nr51 & 0x08) sample_right += ch4_sample;      // Channel 4 on right
+            if (nr51 & 0x80) sample_left += ch4_sample;       // Channel 4 on left
         }
 
-        // Apply master volume
+        // Apply master volume from NR50 (0xFF24)
+        // Bits 6-4: Left volume (0-7)
+        // Bits 2-0: Right volume (0-7)
         float left_vol = ((nr50 >> 4) & 0x07) / 7.0f;
         float right_vol = (nr50 & 0x07) / 7.0f;
 
-        buffer[i] = sample_left * left_vol * AMPLITUDE;     // Left channel
-        buffer[i + 1] = sample_right * right_vol * AMPLITUDE; // Right channel
+        // Clamp to prevent overflow
+        sample_left = (sample_left > 1.0f) ? 1.0f : sample_left;
+        sample_right = (sample_right > 1.0f) ? 1.0f : sample_right;
+
+        buffer[i] = sample_left * left_vol * AMPLITUDE;           // Left channel
+        buffer[i + 1] = sample_right * right_vol * AMPLITUDE;     // Right channel
     }
 }
 
@@ -373,10 +393,24 @@ float APU::generate_pulse_sample(const PulseChannel& ch) const {
 }
 
 float APU::generate_wave_sample(const WaveChannel& ch) const {
-    if (ch.volume_shift == 0) return 0.0f; // Muted
-
+    // Wave channel volume shift: 
+    // 0 = mute (output 0)
+    // 1 = 100% volume (no shift)
+    // 2 = 50% volume (shift right by 1)
+    // 3 = 25% volume (shift right by 2)
+    
+    if (ch.volume_shift == 0) {
+        return 0.0f; // Muted
+    }
+    
     float sample = ch.sample_buffer / 15.0f; // 4-bit sample normalized to 0-1
-    return sample / (1 << (ch.volume_shift - 1)); // Apply volume shift
+    
+    // Apply volume shift (volume_shift 1 means no shift, 2 means /2, 3 means /4)
+    if (ch.volume_shift > 1) {
+        sample = sample / (1 << (ch.volume_shift - 1));
+    }
+    
+    return sample;
 }
 
 float APU::generate_noise_sample(const NoiseChannel& ch) const {

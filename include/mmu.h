@@ -5,6 +5,7 @@
 #include <array>
 #include <vector>
 #include <string>
+#include <fstream>
 #include "ppu.h"
 #include "apu.h"
 
@@ -117,17 +118,22 @@ private:
     // Timer registers
     uint8_t divider;        // DIV (0xFF04) - internal divider
     uint8_t timer_counter;  // TIMA (0xFF05) - timer counter
+    uint8_t timer_modulo;   // TMA (0xFF06) - timer modulo
     uint8_t timer_control;  // TAC (0xFF07) - timer control
     uint16_t internal_counter; // Internal cycle counter for DIV
-    
-    // Timer overflow delay (4 M-cycles)
-    uint8_t timer_overflow_delay;  // 0 = no overflow pending, >0 = cycles remaining
+
+    // TIMA overflow delay狀態
+    bool tima_overflow_pending = false;
+    uint8_t tima_overflow_delay = 0;
     
     // Timer helper functions
     void set_tac(uint8_t value);
 
     // Joypad state
     uint8_t joypad_state;
+
+    // Serial output file
+    std::ofstream serial_output_file;
 
     // MBC helper functions
     void handle_mbc_write(uint16_t address, uint8_t value);
