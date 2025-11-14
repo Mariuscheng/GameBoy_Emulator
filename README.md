@@ -1,4 +1,4 @@
-# GameBoy Emulator (A.I Project)
+# GameBoy Emulator (A.I Project, Not Complete)
 
 > 一個用 C++ 與 SDL3 撰寫的 Game Boy (DMG) 模擬器。現已通過 blargg `cpu_instrs` 全部測試，`dmg-acid2` 圖像測試亦已正確顯示。
 
@@ -145,4 +145,5 @@ OAM 項目解讀：
  - https://gbdev.io/pandocs/
 
 ---
+
 最後更新：2025-11-13
