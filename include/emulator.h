@@ -22,6 +22,7 @@ public:
 
     // Optional: limit how many frames to run before exiting (0 = unlimited)
     void set_max_frames(int frames) { max_frames = frames; }
+
     // Save current framebuffer to a simple binary PPM file (P6)
     bool save_framebuffer_ppm(const std::string& path) const;
 
@@ -38,6 +39,7 @@ private:
     SDL_Renderer* renderer;
     SDL_Texture* texture;
     SDL_AudioStream* audio_stream;
+    SDL_AudioDeviceID audio_device = 0;
 
     bool running;
     bool headless = false;

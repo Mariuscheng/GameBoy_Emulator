@@ -24,7 +24,6 @@ PPU::PPU() : cycle_count(0), shadow_scx(0), shadow_scy(0), ppu_mode(0) {
     
     // Initialize pending flags
     pending_lcd_enable = false;
-    pending_lcd_enable = false;
 }
 
 PPU::~PPU() {
@@ -34,7 +33,13 @@ void PPU::step(int cycles, MMU& mmu) {
     for (int i = 0; i < cycles; ++i) {
         global_cycles++; // 全域 PPU 週期計數（包含 LCD 關閉期間）
         
-        // Check for pending LCD enable (delayed by 1 cycle) - REMOVED: immediate enable now
+        // Check for pending LCD enable (delayed by 1 cycle)
+        if (pending_lcd_enable) {
+            pending_lcd_enable = false;
+            ppu_mode = 2;
+            stat = (stat & ~0x03) | 0x02;
+            std::cout << "[PPU] LCDC ON activated gcy=" << global_cycles << " ly=" << (int)ly << " cyc=" << cycle_count << " mode=2" << std::endl;
+        }
         
         // 如果 LCD 關閉：依規格 LY 固定為 0，停止模式循環與渲染/中斷
         if (!(lcdc & 0x80)) {
@@ -424,24 +429,13 @@ void PPU::set_lcdc(uint8_t value) {
               << std::dec << " ly=" << (int)ly << " cyc=" << cycle_count
               << (turning_on?" (ON edge)":"") << (turning_off?" (OFF edge)":"") << std::endl;
     if (turning_on) {
-        // LCD turning on: immediate enable for accurate timing
+        // LCD turning on: delayed by 1 cycle
+        pending_lcd_enable = true;
         ly = 0;
-        cycle_count = lcd_start_cycle_offset % 456; // safeguard
-        // Determine initial mode from cycle_count per normal visible line timing
-        if (cycle_count < 80) {
-            ppu_mode = 2; // OAM search start
-        } else if (cycle_count < 252) {
-            ppu_mode = 3; // Pixel transfer (started late in line)
-        } else {
-            ppu_mode = 0; // HBlank
-        }
-        stat = (stat & ~0x03) | ppu_mode;
-        std::cout << "[PPU] LCDC ON executed gcy=" << global_cycles << " offset=" << lcd_start_cycle_offset
-                  << " init_cycle=" << cycle_count << " init_mode=" << (int)ppu_mode << std::endl;
-        // Trace LCD ON timing for sync diagnostics
-        if (global_cycles >= 0) { // Always trace in headless mode
-            std::cout << "[PPU][LCD ON TRACE] gcy=" << global_cycles << " ly=" << (int)ly << " cyc=" << cycle_count << " mode=" << (int)ppu_mode << std::endl;
-        }
+        cycle_count = 0;
+        ppu_mode = 0; // Temporary mode
+        stat = (stat & ~0x03) | 0x00;
+        std::cout << "[PPU] LCDC ON pending gcy=" << global_cycles << std::endl;
     } else if (turning_off) {
         // LCD 關閉：LY 立即歸 0；停止行內累積但保留偏移計時器於 0
         ly = 0;
@@ -459,7 +453,7 @@ void PPU::set_lcdc(uint8_t value) {
 
 void PPU::dump_lcd_on_summary() const {
     if (lcd_on_events.empty()) {
-        std::cout << "[PPU][LCD ON SUMMARY] (no events)" << std::endl;
+        // std::cout << "[PPU][LCD ON SUMMARY] (no events)" << std::endl;
         return;
     }
     std::cout << "[PPU][LCD ON SUMMARY] count=" << lcd_on_events.size() << std::endl;

@@ -22,10 +22,10 @@ CPU::~CPU() {
     if (instr_cycle_log.is_open()) {
         instr_cycle_log.close();
     }
-    std::cout << "[CPU SUMMARY] steps=" << step_count
-              << " halt_count=" << halt_count
-              << " halt_bug_count=" << halt_bug_count
-              << std::endl;
+    // std::cout << "[CPU SUMMARY] steps=" << step_count
+    //           << " halt_count=" << halt_count
+    //           << " halt_bug_count=" << halt_bug_count
+    //           << std::endl;
 }
 
 void CPU::reset() {
@@ -948,11 +948,9 @@ void CPU::execute_instruction(uint8_t opcode) {
 
         // Return from interrupt
         case 0xD9: // RETI
-            std::cout << "[CPU] RETI: returning from interrupt, PC=" << PC << " SP=" << SP << std::endl;
             PC = mmu.read_byte(SP) | (mmu.read_byte(SP + 1) << 8);
             SP += 2;
             ime = true; // Re-enable interrupts
-            std::cout << "[CPU] RETI: new PC=" << PC << " IME=1" << std::endl;
             break;
 
         // Call instructions
@@ -1369,9 +1367,9 @@ int CPU::execute_instruction_with_cycles(uint8_t opcode) {
 
         // LDI / LDD block transfer instructions
         case 0x22: // LDI (HL),A
-        case 0x2A: // LDI A,(HL)
+        case 0x2A: // LDI A, (HL)
         case 0x32: // LDD (HL),A
-        case 0x3A: // LDD A,(HL)
+        case 0x3A: // LDD A, (HL)
             cycles = 8; break;
 
         // ALU immediate operations (8 cycles)

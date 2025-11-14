@@ -4,6 +4,11 @@
 #include <iostream>
 #include <algorithm>
 
+// Serial debug flag
+#ifndef GB_SERIAL_DEBUG
+#define GB_SERIAL_DEBUG 0
+#endif
+
 // Helper: selected timer bit by TAC
 static inline uint8_t timer_bit_for_tac(uint8_t tac) {
     switch (tac & 0x03) {
@@ -264,6 +269,7 @@ void MMU::write_byte(uint16_t address, uint8_t value) {
 
     if (address == 0xFF01) {
         memory[0xFF01] = value; // Serial data register
+#if GB_SERIAL_DEBUG
         // Print test output for serial debugging
         char output_char = (char)value;
         std::cout << output_char;
@@ -273,6 +279,7 @@ void MMU::write_byte(uint16_t address, uint8_t value) {
             serial_output_file << output_char;
             serial_output_file.flush();
         }
+#endif
         return;
     }
 
