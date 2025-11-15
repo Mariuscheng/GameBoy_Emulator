@@ -7,14 +7,16 @@
 |--------|------|
 | CPU | 指令集、旗標、EI 延遲、中斷優先順序與服務流程已通過 `cpu_instrs.gb` 全部項目 |
 | PPU | 掃描線/Mode 時序 (456 cycles/line)、背景/視窗/Sprite 渲染皆正常；`dmg-acid2` 已通過（含右下 Window/遮蔽/優先序） |
-| APU | 目前骨架存在，可輸出樣本（尚未與測試 ROM 嚴格比對） |
+| APU | 新表驅動架構已上線；通過 `01-registers.gb`，`02-len ctr.gb` 正在實作長度計數器/狀態位細節 |
 | MMU | 寄存器、IF/IE、Timer (DIV/TIMA/TMA/TAC)；已實作 CPU 端 VRAM/OAM 忙碌鎖定，並提供 `ppu_read` 供 PPU 在 Mode2/3 期間合法讀取 |
 | 測試 | blargg `cpu_instrs`：Passed all tests；`dmg-acid2`：Passed |
 
 ## 已知待辦 / 未完成
 1. **Memory 時序（mem_timing 測試）**：當前實現一次性執行整個指令（包括參數讀取與執行），不符合 Game Boy 硬體的 M-cycle 精確分解。解決此問題需要重構 CPU 執行引擎以實現基於 M-cycle 的微操作系統。
 2. 精細像素 FIFO 與 SCX 捲動延遲、STAT 中斷精準觸發點（acid2 已過，但為提升相容性仍建議實作）。
-3. APU 聲道細節、增益/掃頻/包絡的精準化與測試。
+3. APU：
+  - 長度計數器（`NRx1`/`NRx4` bit6）與 `NR52` 狀態位（NW21）完全對齊 Pandocs（`02-len ctr` 進行中）。
+  - 包絡/掃頻/頻率計時器與觸發副作用（`03` 以後測試）。
 4. 減少除錯輸出：以 compile-time 或 runtime 旗標控制（避免影響效能）。
 
 ## 主要技術特性
@@ -52,6 +54,9 @@ cmake --build build --config Debug
 .\build\Debug\GameBoy.exe .\roms\cpu_instrs.gb
 .\build\Debug\GameBoy.exe .\roms\dmg-acid2.gb
 .\build\Debug\GameBoy.exe .\roms\tetris.gb
+# APU 測試（檔名含空白請加引號）
+.\build\Debug\GameBoy.exe ".\roms\01-registers.gb"
+.\build\Debug\GameBoy.exe ".\roms\02-len ctr.gb"
 ```
 
 ### Visual Studio (可選)
@@ -112,6 +117,29 @@ cmake --build build --config Debug
 
 > 你已通過 1~3，建議依序挑戰 APU 與 MMU/Timer/Interrupt 相關測試！
 
+## APU 重構進度（概覽）
+- 表驅動暫存器表（`0xFF10–0xFF26`）：
+  - 以 `read_mask`/`write_mask`/`writable_when_off` 描述各寄存器行為。
+  - `APU off` 時：僅 `NR52` 可寫（bit7），其餘寫入忽略；`Wave RAM 0xFF30–0xFF3F` 永遠可存取。
+  - `NR52` 讀值：bit7=電源；bits0–3 回報每聲道「狀態位」（對齊 NW21 語意）。
+- 狀態與資料分離：
+  - `regs[]` 儲存原始寄存器值；
+  - `ChannelState` 儲存啟用旗標、DAC on、長度計數器等。
+- Frame Sequencer（512 Hz）：已加入長度計數步進（0/2/4/6）。
+- 目前結果：
+  - `01-registers.gb`：Pass。
+  - `02-len ctr.gb`：進行中（「Trigger 不應重設長度」等邊界條件修正中）。
+
+### APU 追蹤（輕量）
+可透過環境變數開啟 APU 讀寫追蹤（輸出至 `apu_trace.txt`）。
+
+```powershell
+$env:APU_TRACE=1
+cmake --build build --config Debug
+.\build\Debug\GameBoy.exe ".\roms\02-len ctr.gb"
+Get-Content .\apu_trace.txt -Tail 100
+```
+
 ### OAM / Sprite 測試與 acid2 使用說明
 `dmg-acid2.gb` 可用來檢驗：背景/視窗組合、Sprite 排序與遮蔽、Mode2/Mode3 時序。
 
@@ -168,5 +196,4 @@ OAM 項目解讀：
  - https://gbdev.io/pandocs/
 
 ---
-
-最後更新：2025-11-15
+最後更新：2025-11-16
