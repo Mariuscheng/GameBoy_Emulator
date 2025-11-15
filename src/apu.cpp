@@ -194,26 +194,29 @@ uint8_t APU::read_register(uint16_t address) const {
     const uint8_t index = address - 0xFF10;
     const RegisterDescriptor& desc = reg_table[index];
     
-    // APU powered off: return special values
+    // APU off: most registers remain readable with normal masks; NR52 is special
     if (!apu_powered()) {
         if (address == 0xFF26) {
             // NR52: returns 0x70 | channel_status when off
-            return debug_read(address, desc.apu_off_value | get_channel_status());
+            return debug_read(address, (uint8_t)(0x70 | get_channel_status()));
         }
-        return debug_read(address, desc.apu_off_value);
+        // Read back masked value from cleared storage
+        uint8_t v = regs[index];
+        v = (v & desc.read_mask) | (uint8_t)(~desc.read_mask);
+        return debug_read(address, v);
     }
-    
-    // APU powered on: read from register storage
+
+    // APU on: read from register storage
     uint8_t value = regs[index];
-    
+
     // NR52 special handling: merge power bit with channel status
     if (address == 0xFF26) {
         value = (regs[0x16] & 0x80) | get_channel_status();
     }
-    
+
     // Apply read mask: readable bits return actual value, others return 1
-    value = (value & desc.read_mask) | ~desc.read_mask;
-    
+    value = (value & desc.read_mask) | (uint8_t)(~desc.read_mask);
+
     return debug_read(address, value);
 }
 
