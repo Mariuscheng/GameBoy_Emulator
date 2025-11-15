@@ -26,6 +26,7 @@ void CPU::execute_cb_instruction(uint8_t cb_opcode) {
     uint8_t operation = cb_opcode >> 3;
 
     if (reg_code == 6) { // (HL)
+        // Micro-step timing handled in CB path of execute_instruction_with_cycles
         uint8_t value = mmu.read_byte(HL);
         uint8_t result;
 

@@ -33,12 +33,18 @@ void PPU::step(int cycles, MMU& mmu) {
     for (int i = 0; i < cycles; ++i) {
         global_cycles++; // 全域 PPU 週期計數（包含 LCD 關閉期間）
         
-        // Check for pending LCD enable (delayed by 1 cycle)
+        // Check for pending LCD enable with programmable delay (default 4 T-cycles)
         if (pending_lcd_enable) {
-            pending_lcd_enable = false;
-            ppu_mode = 2;
-            stat = (stat & ~0x03) | 0x02;
-            std::cout << "[PPU] LCDC ON activated gcy=" << global_cycles << " ly=" << (int)ly << " cyc=" << cycle_count << " mode=2" << std::endl;
+            if (pending_lcd_enable_delay > 0) {
+                pending_lcd_enable_delay--; // wait precise T-cycles
+            }
+            if (pending_lcd_enable_delay == 0) {
+                pending_lcd_enable = false;
+                cycle_count = 0; // Reset cycle_count when LCD actually turns on
+                ppu_mode = 2;
+                stat = (stat & ~0x03) | 0x02;
+                std::cout << "[PPU] LCDC ON activated gcy=" << global_cycles << " ly=" << (int)ly << " cyc=" << cycle_count << " mode=2" << std::endl;
+            }
         }
         
         // 如果 LCD 關閉：依規格 LY 固定為 0，停止模式循環與渲染/中斷
@@ -122,8 +128,13 @@ void PPU::step(int cycles, MMU& mmu) {
         if (ppu_mode == 2) {
             // cycle_count is cycles elapsed so far in this scanline BEFORE increment below.
             // Map 0..79 -> sprite index 0..39 (2 cycles per sprite). Pair base uses Y/X (first two bytes) at FE00 + i*4.
+            // During the first cycle of each pair, we read Y; during the second, we read X.
+            // For corruption purposes, we need to track which sprite pair is currently being accessed.
             uint8_t sprite_index = (cycle_count < 80) ? (uint8_t)(cycle_count / 2) : 39;
             oam_search_pair_base = 0xFE00 + sprite_index * 4;
+        } else if (ppu_mode != 3) {
+            // Outside Mode 2 and 3, reset to base to avoid stale corruption source
+            oam_search_pair_base = 0xFE00;
         }
 
         cycle_count++;
@@ -429,10 +440,11 @@ void PPU::set_lcdc(uint8_t value) {
               << std::dec << " ly=" << (int)ly << " cyc=" << cycle_count
               << (turning_on?" (ON edge)":"") << (turning_off?" (OFF edge)":"") << std::endl;
     if (turning_on) {
-        // LCD turning on: delayed by 1 cycle
+        // LCD turning on: delay activation by 4 T-cycles to match hardware sync
         pending_lcd_enable = true;
+        pending_lcd_enable_delay = 4; // 1 M-cycle (4 dots)
         ly = 0;
-        cycle_count = 0;
+        // Do NOT reset cycle_count here - let it reset when LCD actually activates
         ppu_mode = 0; // Temporary mode
         stat = (stat & ~0x03) | 0x00;
         std::cout << "[PPU] LCDC ON pending gcy=" << global_cycles << std::endl;

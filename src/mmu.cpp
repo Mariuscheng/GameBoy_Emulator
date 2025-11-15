@@ -6,7 +6,7 @@
 
 // Serial debug flag
 #ifndef GB_SERIAL_DEBUG
-#define GB_SERIAL_DEBUG 0
+#define GB_SERIAL_DEBUG 1 // Enable serial debug to observe cpu_instrs progression
 #endif
 
 // Helper: selected timer bit by TAC
@@ -347,16 +347,25 @@ void MMU::write_byte(uint16_t address, uint8_t value) {
     if (address >= 0xFE00 && address <= 0xFE9F) {
         uint8_t mode = ppu.get_stat() & 0x03;
         if (mode == 2 || mode == 3) {
-            // Precise source selection:
-            // Mode2: current pair being fetched by OAM search (Y/X of sprite index)
-            // Mode3: frozen last Mode2 pair (source does not advance)
+            // OAM bug: During Mode 2/3, writes to OAM are corrupted.
+            // The written value is replaced with the byte currently being read by PPU's OAM search.
+            // 
+            // Mode 2: PPU scans sprites sequentially (2 cycles per sprite: Y then X)
+            // - Even cycles (0,2,4...): reading sprite Y (offset +0)
+            // - Odd cycles (1,3,5...): reading sprite X (offset +1)
+            // 
+            // Mode 3: PPU uses the last sprite pair read in Mode 2
+            
             uint16_t source_base = (mode == 2) ? ppu.get_oam_search_pair_base()
                                               : ppu.get_oam_last_mode2_pair_base();
-            uint16_t dest_pair_base = address & 0xFFFE; // align to Y/X pair
-            uint8_t src_lo = memory[source_base];
-            uint8_t src_hi = memory[source_base + 1];
-            memory[dest_pair_base] = src_lo;
-            if (dest_pair_base + 1 <= 0xFE9F) memory[dest_pair_base + 1] = src_hi;
+            
+            // Determine which byte (Y or X) is currently being read based on PPU cycle phase
+            uint8_t cycle_mod = ppu.get_cycle_mod4() & 0x01; // 0 = Y, 1 = X
+            uint16_t source_addr = source_base + cycle_mod;
+            
+            // Write the corrupted value (single byte from PPU's current read position)
+            uint8_t corrupted_value = memory[source_addr];
+            memory[address] = corrupted_value;
             return; // write consumed by corruption
         }
         // Normal (unrestricted) OAM write

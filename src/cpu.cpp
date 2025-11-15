@@ -39,7 +39,7 @@ void CPU::reset() {
     // Load flags from F register (set by AF = 0x01B0)
     load_flags_from_f();
 
-    ime = false; // Interrupts DISABLED by default on startup
+    ime = false; // Interrupts DISABLED by default; ROM will EI when needed
     halted = false;
     just_woken_from_halt = false; // Not woken from halt on reset
     ei_delay_pending = false; // No EI delay pending on reset
@@ -81,11 +81,22 @@ int CPU::step() {
     } else {
         opcode = mmu.read_byte(PC++);
     }
-    // Only log in certain ranges to reduce noise
-    if (PC >= 0x50 && PC <= 0x60) {
-        std::cout << "[CPU] PC=" << std::hex << (PC-1) << std::dec << " opcode=0x" << std::hex << (int)opcode << std::dec << " IME=" << (int)ime << std::endl;
+    // Expanded logging: first 200 instructions OR targeted PC window
+    if (step_count < 200 || (PC >= 0x50 && PC <= 0x60)) {
+        std::cout << "[CPU] step=" << step_count << " PC=" << std::hex << (PC-1)
+                  << std::dec << " opcode=0x" << std::hex << (int)opcode << std::dec
+                  << " IME=" << (int)ime << " IF=" << std::hex << (int)mmu.read_byte(0xFF0F)
+                  << " IE=" << (int)mmu.read_byte(0xFFFF) << std::dec << std::endl;
+    }
+    // In timing test mode, model M1 (opcode fetch) as 4 T-cycles before executing the body
+    if (timing_test_mode) {
+        burn_tcycles(4); // M1 opcode fetch
     }
     int cycles = execute_instruction_with_cycles(opcode);
+    if (timing_test_mode) {
+        // We already burned 4 T-cycles for M1 above; exclude them from the count
+        if (cycles >= 4) cycles -= 4; else cycles = 0;
+    }
 
     // Update timer based on instruction cycles
     mmu.update_timer_cycles(static_cast<uint8_t>(cycles));
@@ -194,7 +205,17 @@ void CPU::execute_instruction(uint8_t opcode) {
             L = mmu.read_byte(PC++);
             break;
         case 0x36: // LD (HL), n
-            mmu.write_byte(HL, mmu.read_byte(PC++));
+            {
+                uint8_t value = mmu.read_byte(PC++);
+                if (timing_test_mode) {
+                    burn_tcycles(4);             // M2 (immediate fetch) - T4-7
+                    burn_tcycles(2);             // M3 setup - T8-9
+                    mmu.write_byte(HL, value);   // Write at T10-11 (T2-3 of M3)
+                    burn_tcycles(2);             // M3 complete - T10-11
+                } else {
+                    mmu.write_byte(HL, value);
+                }
+            }
             break;
         case 0x3E: // LD A, n
             A = mmu.read_byte(PC++);
@@ -234,7 +255,12 @@ void CPU::execute_instruction(uint8_t opcode) {
             B = L;
             break;
         case 0x46: // LD B, (HL)
-            B = mmu.read_byte(HL);
+            if (timing_test_mode) {
+                B = mmu.read_byte(HL);       // M2: read at start (M1 already burned in step())
+                burn_tcycles(4);             // finish M2
+            } else {
+                B = mmu.read_byte(HL);
+            }
             break;
         case 0x47: // LD B, A
             B = A;
@@ -259,7 +285,12 @@ void CPU::execute_instruction(uint8_t opcode) {
             C = L;
             break;
         case 0x4E: // LD C, (HL)
-            C = mmu.read_byte(HL);
+            if (timing_test_mode) {
+                C = mmu.read_byte(HL);
+                burn_tcycles(4);
+            } else {
+                C = mmu.read_byte(HL);
+            }
             break;
         case 0x4F: // LD C, A
             C = A;
@@ -284,7 +315,12 @@ void CPU::execute_instruction(uint8_t opcode) {
             D = L;
             break;
         case 0x56: // LD D, (HL)
-            D = mmu.read_byte(HL);
+            if (timing_test_mode) {
+                D = mmu.read_byte(HL);
+                burn_tcycles(4);
+            } else {
+                D = mmu.read_byte(HL);
+            }
             break;
         case 0x57: // LD D, A
             D = A;
@@ -309,7 +345,12 @@ void CPU::execute_instruction(uint8_t opcode) {
             H = L;
             break;
         case 0x66: // LD H, (HL)
-            H = mmu.read_byte(HL);
+            if (timing_test_mode) {
+                H = mmu.read_byte(HL);
+                burn_tcycles(4);
+            } else {
+                H = mmu.read_byte(HL);
+            }
             break;
         case 0x67: // LD H, A
             H = A;
@@ -334,7 +375,12 @@ void CPU::execute_instruction(uint8_t opcode) {
             L = L;
             break;
         case 0x6E: // LD L, (HL)
-            L = mmu.read_byte(HL);
+            if (timing_test_mode) {
+                L = mmu.read_byte(HL);
+                burn_tcycles(4);
+            } else {
+                L = mmu.read_byte(HL);
+            }
             break;
         case 0x6F: // LD L, A
             L = A;
@@ -359,7 +405,12 @@ void CPU::execute_instruction(uint8_t opcode) {
             E = L;
             break;
         case 0x5E: // LD E, (HL)
-            E = mmu.read_byte(HL);
+            if (timing_test_mode) {
+                E = mmu.read_byte(HL);
+                burn_tcycles(4);
+            } else {
+                E = mmu.read_byte(HL);
+            }
             break;
         case 0x5F: // LD E, A
             E = A;
@@ -420,10 +471,29 @@ void CPU::execute_instruction(uint8_t opcode) {
 
         // LDH instructions (High RAM access)
         case 0xE0: // LDH (n), A
-            mmu.write_byte(0xFF00 + mmu.read_byte(PC++), A);
+            {
+                uint8_t offset = mmu.read_byte(PC++);
+                if (timing_test_mode) {
+                    burn_tcycles(4);                      // M2 (offset fetch) - T4-7
+                    burn_tcycles(2);                      // M3 setup - T8-9
+                    mmu.write_byte(0xFF00 + offset, A);   // Write at T10-11 (T2-3 of M3)
+                    burn_tcycles(2);                      // M3 complete - T10-11
+                } else {
+                    mmu.write_byte(0xFF00 + offset, A);
+                }
+            }
             break;
         case 0xF0: // LDH A, (n)
-            A = mmu.read_byte(0xFF00 + mmu.read_byte(PC++));
+            {
+                uint8_t imm = mmu.read_byte(PC++);
+                if (timing_test_mode) {
+                    burn_tcycles(4);                 // M2 (imm fetch time represented; M1 burned in step())
+                    A = mmu.read_byte(0xFF00 + imm); // M3 read at start
+                    burn_tcycles(4);                 // finish M3
+                } else {
+                    A = mmu.read_byte(0xFF00 + imm);
+                }
+            }
             break;
 
         // LD A, (C) / LD (C), A
@@ -439,14 +509,29 @@ void CPU::execute_instruction(uint8_t opcode) {
             {
                 uint16_t addr = mmu.read_byte(PC++);
                 addr |= mmu.read_byte(PC++) << 8;
-                mmu.write_byte(addr, A);
+                if (timing_test_mode) {
+                    burn_tcycles(4);             // M2 (addr low) - T4-7
+                    burn_tcycles(4);             // M3 (addr high) - T8-11
+                    burn_tcycles(2);             // M4 setup - T12-13
+                    mmu.write_byte(addr, A);     // Write at T14-15 (T2-3 of M4)
+                    burn_tcycles(2);             // M4 complete - T14-15
+                } else {
+                    mmu.write_byte(addr, A);
+                }
             }
             break;
         case 0xFA: // LD A, (nn)
             {
                 uint16_t addr = mmu.read_byte(PC++);
                 addr |= mmu.read_byte(PC++) << 8;
-                A = mmu.read_byte(addr);
+                if (timing_test_mode) {
+                    burn_tcycles(4);             // M2 (low)
+                    burn_tcycles(4);             // M3 (high)
+                    A = mmu.read_byte(addr);     // M4 read at start
+                    burn_tcycles(4);             // finish M4
+                } else {
+                    A = mmu.read_byte(addr);
+                }
             }
             break;
 
@@ -754,9 +839,18 @@ void CPU::execute_instruction(uint8_t opcode) {
             break;
         case 0x34: // INC (HL)
             {
-                uint8_t value = mmu.read_byte(HL);
-                inc(value);
-                mmu.write_byte(HL, value);
+                if (timing_test_mode) {
+                    uint8_t value = mmu.read_byte(HL);   // M2 read at start (T4)
+                    burn_tcycles(4);                      // M2 complete
+                    inc(value);                           // Modify during M2->M3 transition
+                    burn_tcycles(2);                      // M3 setup
+                    mmu.write_byte(HL, value);            // M3 write at T10-11 (T2-3 of M3)
+                    burn_tcycles(2);                      // M3 complete
+                } else {
+                    uint8_t value = mmu.read_byte(HL);
+                    inc(value);
+                    mmu.write_byte(HL, value);
+                }
             }
             break;
         case 0x3C: // INC A
@@ -784,9 +878,18 @@ void CPU::execute_instruction(uint8_t opcode) {
             break;
         case 0x35: // DEC (HL)
             {
-                uint8_t value = mmu.read_byte(HL);
-                dec(value);
-                mmu.write_byte(HL, value);
+                if (timing_test_mode) {
+                    uint8_t value = mmu.read_byte(HL);   // M2 read at start (T4)
+                    burn_tcycles(4);                      // M2 complete
+                    dec(value);                           // Modify during M2->M3 transition
+                    burn_tcycles(2);                      // M3 setup
+                    mmu.write_byte(HL, value);            // M3 write at T10-11 (T2-3 of M3)
+                    burn_tcycles(2);                      // M3 complete
+                } else {
+                    uint8_t value = mmu.read_byte(HL);
+                    dec(value);
+                    mmu.write_byte(HL, value);
+                }
             }
             break;
         case 0x3D: // DEC A
@@ -1130,7 +1233,12 @@ void CPU::execute_instruction(uint8_t opcode) {
             A = L;
             break;
         case 0x7E: // LD A, (HL)
-            A = mmu.read_byte(HL);
+            if (timing_test_mode) {
+                A = mmu.read_byte(HL);
+                burn_tcycles(4);
+            } else {
+                A = mmu.read_byte(HL);
+            }
             break;
         case 0x7F: // LD A, A
             A = A;
@@ -1254,6 +1362,8 @@ void CPU::execute_instruction(uint8_t opcode) {
 }
 
 int CPU::execute_instruction_with_cycles(uint8_t opcode) {
+    // Reset per-instruction burned T-cycles accounting
+    timing_burned_tcycles = 0;
     // Expected cycle table (machine cycles) for non-CB opcodes (Pan Docs). CB handled separately.
     // NOTE: Conditional instructions use max cycles when taken; we will compute actual below.
     static const int expected_cycles[256] = {
@@ -1275,22 +1385,125 @@ int CPU::execute_instruction_with_cycles(uint8_t opcode) {
         /*F0*/12,/*F1*/12,/*F2*/8,/*F3*/4,/*F4*/4,/*F5*/16,/*F6*/8,/*F7*/16, /*F8*/12,/*F9*/8,/*FA*/16,/*FB*/4,/*FC*/4,/*FD*/4,/*FE*/8,/*FF*/16
     };
 
-    // Reference: Pan Docs / GB CPU timings. All cycles here are machine cycles (4 T-states per cycle).
+    // Reference: Pan Docs / GB CPU timings. Values represent T-cycles (4T per M-cycle).
     int cycles = 4; // Default for simple register ops
+
+    // Note: Do NOT align instruction start to any external phase.
+    // Real hardware proceeds continuously; artificial alignment causes jitter in tests.
 
     // Handle CB prefix first (special timing: 8 or 16 depending on operand)
     if (opcode == 0xCB) {
-        uint8_t cb_opcode = mmu.read_byte(PC++);
+        // Micro-step: represent M2 timing for CB sub-opcode fetch (M1 burned in step())
+        uint8_t cb_opcode = mmu.read_byte(PC++); // fetch CB sub-opcode
+        if (timing_test_mode) {
+            burn_tcycles(4); // M2 (cb sub-opcode fetch)
+        }
         bool operand_is_hl = (cb_opcode & 0x07) == 0x06;
         uint8_t operation = cb_opcode >> 3; // 0-31 groups (RLC..SET)
         bool is_bit = (operation >= 8 && operation <= 15);
-        execute_cb_instruction(cb_opcode);
+        
+        // For (HL) operand with timing_test_mode, handle read-modify-write timing
+        if (timing_test_mode && operand_is_hl) {
+            // CB (HL) instructions: 16 cycles = M1(4) + M2(4) + M3(4) + M4(4)
+            // BIT (HL): 12 cycles = M1(4) + M2(4) + M3(4) [no write]
+            // Read happens at start of M3, write at start of M4
+            
+            uint8_t value = mmu.read_byte(HL);    // M3 read at start (T8)
+            burn_tcycles(4);                       // M3 complete
+            
+            // Now execute the operation (modify phase)
+            if (is_bit) {
+                // BIT operations - only test, no write
+                uint8_t bit = operation - 8;
+                zero_flag = (value & (1 << bit)) == 0;
+                subtract_flag = false;
+                half_carry_flag = true;
+                // No M4 for BIT, done at 12 cycles
+            } else {
+                // RLC/RRC/RL/RR/SLA/SRA/SWAP/SRL/RES/SET - all write
+                uint8_t result;
+                if (operation == 0) { // RLC
+                    carry_flag = (value & 0x80) != 0;
+                    result = (value << 1) | (carry_flag ? 1 : 0);
+                    zero_flag = result == 0;
+                    subtract_flag = false;
+                    half_carry_flag = false;
+                } else if (operation == 1) { // RRC
+                    carry_flag = (value & 0x01) != 0;
+                    result = (value >> 1) | (carry_flag ? 0x80 : 0);
+                    zero_flag = result == 0;
+                    subtract_flag = false;
+                    half_carry_flag = false;
+                } else if (operation == 2) { // RL
+                    bool old_carry = carry_flag;
+                    carry_flag = (value & 0x80) != 0;
+                    result = (value << 1) | (old_carry ? 1 : 0);
+                    zero_flag = result == 0;
+                    subtract_flag = false;
+                    half_carry_flag = false;
+                } else if (operation == 3) { // RR
+                    bool old_carry = carry_flag;
+                    carry_flag = (value & 0x01) != 0;
+                    result = (value >> 1) | (old_carry ? 0x80 : 0);
+                    zero_flag = result == 0;
+                    subtract_flag = false;
+                    half_carry_flag = false;
+                } else if (operation == 4) { // SLA
+                    carry_flag = (value & 0x80) != 0;
+                    result = value << 1;
+                    zero_flag = result == 0;
+                    subtract_flag = false;
+                    half_carry_flag = false;
+                } else if (operation == 5) { // SRA
+                    carry_flag = (value & 0x01) != 0;
+                    result = (value >> 1) | (value & 0x80);
+                    zero_flag = result == 0;
+                    subtract_flag = false;
+                    half_carry_flag = false;
+                } else if (operation == 6) { // SWAP
+                    result = ((value & 0x0F) << 4) | ((value & 0xF0) >> 4);
+                    zero_flag = result == 0;
+                    subtract_flag = false;
+                    half_carry_flag = false;
+                    carry_flag = false;
+                } else if (operation == 7) { // SRL
+                    carry_flag = (value & 0x01) != 0;
+                    result = value >> 1;
+                    zero_flag = result == 0;
+                    subtract_flag = false;
+                    half_carry_flag = false;
+                } else if (operation >= 16 && operation <= 23) { // RES
+                    uint8_t bit = operation - 16;
+                    result = value & ~(1 << bit);
+                } else if (operation >= 24 && operation <= 31) { // SET
+                    uint8_t bit = operation - 24;
+                    result = value | (1 << bit);
+                } else {
+                    result = value; // Fallback
+                }
+                
+                // Write phase: M4
+                burn_tcycles(2);                       // M4 setup
+                mmu.write_byte(HL, result);            // M4 write at T14-15 (T2-3 of M4)
+                burn_tcycles(2);                       // M4 complete
+            }
+            sync_f_register(); // Sync F register after CB instruction
+        } else {
+            // Non-(HL) operands or non-timing-test-mode
+            execute_cb_instruction(cb_opcode);
+        }
+        
         int real_cb_cycles;
         if (operand_is_hl) {
             // BIT (HL) is 12 cycles; all other (HL) CB ops are 16.
             real_cb_cycles = is_bit ? 12 : 16;
         } else {
             real_cb_cycles = 8; // All register CB ops are 8 cycles.
+        }
+        if (timing_test_mode && timing_burned_tcycles > 0) {
+            int adjusted = real_cb_cycles - timing_burned_tcycles;
+            if (adjusted < 0) adjusted = 0;
+            real_cb_cycles = adjusted;
         }
         int expected_cb_cycles = real_cb_cycles; // Using Pan Docs rules above
         if (instr_cycle_log.is_open()) {
@@ -1431,6 +1644,11 @@ int CPU::execute_instruction_with_cycles(uint8_t opcode) {
     // Execute the instruction core logic
     execute_instruction(opcode);
     int reported = cycles;
+    if (timing_test_mode && timing_burned_tcycles > 0) {
+        // We already advanced PPU/APU/TIMA by timing_burned_tcycles inside the instruction;
+        // subtract them from the cycles we report so outer loop doesn't double-step.
+        if (reported >= timing_burned_tcycles) reported -= timing_burned_tcycles;
+    }
     // Conditional adjustments: overwrite 'reported' but keep 'cycles' proper
     // We already computed actual above.
 

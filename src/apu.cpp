@@ -106,8 +106,10 @@ void APU::step(int cycles) {
 }
 
 uint8_t APU::read_register(uint16_t address) const {
+    // When APU is powered off (NR52 bit7 = 0), most sound registers read as 0xFF.
+    // The only exception is wave RAM (FF30-FF3F) which remains readable/writable.
     if (!(nr52 & 0x80) && !(address >= 0xFF30 && address <= 0xFF3F)) {
-        return debug_read(address, 0);
+        return debug_read(address, 0xFF);
     }
     
     uint8_t val = 0xFF;

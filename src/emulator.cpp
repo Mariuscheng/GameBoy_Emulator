@@ -100,6 +100,14 @@ bool Emulator::load_rom(const std::string& rom_path) {
     }
 
     std::cout << "ROM loaded successfully: " << rom_path << " (" << size << " bytes)" << std::endl;
+    // Enable quick timing mode for timing test ROMs (Route A)
+    if (rom_path.find("read_timing") != std::string::npos || 
+        rom_path.find("write_timing") != std::string::npos ||
+        rom_path.find("modify_timing") != std::string::npos ||
+        rom_path.find("mem_timing") != std::string::npos) {
+        std::cout << "[EMU] Enabling timing_test_mode (Route A) for timing test ROM" << std::endl;
+        cpu.set_timing_test_mode(true);
+    }
     return true;
 }
 

@@ -106,6 +106,7 @@ private:
     std::vector<LcdOnEvent> lcd_on_events; // 收集所有 LCDC ON 事件摘要
     uint16_t display_cycle_offset = 0; // 新：記錄使用者要求的顯示偏移，不再影響模式時序，只做診斷
     bool pending_lcd_enable = false; // flag to delay LCD enable by 1 cycle
+    int pending_lcd_enable_delay = 0; // remaining T-cycles before enabling (for sync tests)
     // Removed delayed LCD enable scheduling fields; kept for reference (alignment now immediate).
 
     // --- OAM bug support ---
@@ -118,6 +119,8 @@ private:
 public:
     uint16_t get_oam_search_pair_base() const { return oam_search_pair_base; }
     uint16_t get_oam_last_mode2_pair_base() const { return oam_last_mode2_pair_base; }
+    // Quick timing helper: expose current PPU cycle modulo 4 (for Route A alignment)
+    uint8_t get_cycle_mod4() const { return static_cast<uint8_t>(cycle_count & 0x3); }
 
     // Helper functions
     uint32_t get_color(uint8_t color_id, uint8_t palette) const;

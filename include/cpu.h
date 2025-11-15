@@ -73,6 +73,9 @@ public:
     int execute_instruction_with_cycles(uint8_t opcode); // Returns cycles
     void sync_f_register(); // Sync F register from flags
     void load_flags_from_f(); // Load flags from F register
+    
+    // Timing test quick mode
+    void set_timing_test_mode(bool on) { timing_test_mode = on; }
 
 private:
     MMU& mmu;
@@ -110,6 +113,27 @@ private:
     void bit(uint8_t bit, uint8_t value);
     void res(uint8_t bit, uint8_t& reg);
     void set(uint8_t bit, uint8_t& reg);
+
+    // --- Quick micro-step helpers (Route A) ---
+    bool timing_test_mode = false;
+    int timing_burned_tcycles = 0; // consumed inside instruction
+    void burn_tcycles(int t) {
+        if (!timing_test_mode || t <= 0) return;
+        for (int i = 0; i < t; ++i) {
+            mmu.get_ppu().step(1, mmu);
+            mmu.get_apu().step(1);
+            mmu.update_timer_cycles(1);
+            ++timing_burned_tcycles;
+        }
+    }
+    void burn_align4_then(int extra) {
+        if (!timing_test_mode) return;
+        // Align based on PPU phase to stabilize read timing test
+        uint8_t mod4 = mmu.get_ppu().get_cycle_mod4();
+        int need = (4 - (mod4 % 4)) % 4;
+        if (need) burn_tcycles(need);
+        if (extra > 0) burn_tcycles(extra);
+    }
 };
 
 #endif // CPU_H

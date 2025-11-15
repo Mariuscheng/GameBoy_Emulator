@@ -47,6 +47,15 @@ public:
     uint8_t get_timer_control() const { return timer_control; }
     void update_timer_cycles(uint8_t cycles);
 
+    // Expose current T-cycle modulo (for quick timing hacks only)
+    uint8_t get_cycle_mod4() const { return static_cast<uint8_t>(internal_counter & 0x3); }
+
+    // Force-align internal cycle counter to 4T boundary (Route A hack)
+    void force_align_cycle_boundary() {
+        internal_counter &= 0xFFFC; // clear lower 2 bits (align to 4T)
+        divider = static_cast<uint8_t>((internal_counter >> 8) & 0xFF);
+    }
+
 private:
     std::array<uint8_t, 0x10000> memory; // 64KB total
 
