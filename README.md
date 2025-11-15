@@ -12,9 +12,10 @@
 | 測試 | blargg `cpu_instrs`：Passed all tests；`dmg-acid2`：Passed |
 
 ## 已知待辦 / 未完成
-1. 精細像素 FIFO 與 SCX 捲動延遲、STAT 中斷精準觸發點（acid2 已過，但為提升相容性仍建議實作）。
-2. APU 聲道細節、增益/掃頻/包絡的精準化與測試。
-3. 減少除錯輸出：以 compile-time 或 runtime 旗標控制（避免影響效能）。
+1. **Memory 時序（mem_timing 測試）**：當前實現一次性執行整個指令（包括參數讀取與執行），不符合 Game Boy 硬體的 M-cycle 精確分解。解決此問題需要重構 CPU 執行引擎以實現基於 M-cycle 的微操作系統。
+2. 精細像素 FIFO 與 SCX 捲動延遲、STAT 中斷精準觸發點（acid2 已過，但為提升相容性仍建議實作）。
+3. APU 聲道細節、增益/掃頻/包絡的精準化與測試。
+4. 減少除錯輸出：以 compile-time 或 runtime 旗標控制（避免影響效能）。
 
 ## 主要技術特性
 - C++20 (原始 README 標示 C++14，現已升級並使用現代語言特性)。
@@ -29,53 +30,53 @@
 ```
 GameBoy/
 ├── main.cpp              # 入口
-├── analyze_rom.cpp       # ROM 分析工具
+├── CMakeLists.txt        # CMake 配置
 ├── include/              # 標頭
 │   ├── cpu.h / mmu.h / ppu.h / apu.h / emulator.h
 ├── src/                  # 實作檔
 │   ├── cpu.cpp / mmu.cpp / ppu.cpp / apu.cpp / emulator.cpp
 ├── roms/                 # 測試與範例 ROM (acid2, cpu_instrs, tetris 等)
-├── build/                # CMake/VS 產物 (生成後)
-└── x64/Debug/            # Visual Studio 輸出（含 SDL3.dll）
+├── build/                # CMake 產物 (生成後)
+│   ├── Debug/            # Debug 輸出
+│   └── Release/          # Release 輸出
+└── README.md             # 此檔案
 ```
 
 ## 編譯與執行
-### Visual Studio (Windows)
-1. 開啟 `GameBoy.sln`。
-2. 設定組態 `Debug | x64`。
-3. 建置後 `SDL3.dll` 會自動複製到輸出目錄。若缺失可手動放入。
-4. 執行範例：
-	- 若從【專案根目錄】呼叫（建議，路徑最簡單）：
+### CMake (推薦)
 ```powershell
-./x64/Debug/GameBoy.exe ./roms/cpu_instrs.gb
-./x64/Debug/GameBoy.exe ./roms/dmg-acid2.gb
-./x64/Debug/GameBoy.exe ./roms/dmg-acid2.gb 32   # 指定 LCD start offset (例：32)
-```
-	- 若在 `build\Debug` 資料夾內（CMake 產物目錄）：需回到兩層以上找 ROM：
-```powershell
-./GameBoy.exe ../../roms/cpu_instrs.gb
-./GameBoy.exe ../../roms/dmg-acid2.gb
-```
-	  注意：`build/Debug` 目錄下沒有 `x64/Debug` 子資料夾；若要執行根目錄的 VS 輸出，可用：
-```powershell
-../../x64/Debug/GameBoy.exe ../../roms/dmg-acid2.gb
-```
-	  (第一個 `../../` 回到專案根，再進入 `x64/Debug`)
-	- 若在 `x64\Debug`（Visual Studio 直接輸出）：ROM 相對路徑同根目錄：
-```powershell
-./GameBoy.exe ./roms/cpu_instrs.gb
-./GameBoy.exe ./roms/dmg-acid2.gb
+# 從專案根目錄
+cmake -S . -B build
+cmake --build build --config Debug
+# 執行
+.\build\Debug\GameBoy.exe .\roms\cpu_instrs.gb
+.\build\Debug\GameBoy.exe .\roms\dmg-acid2.gb
+.\build\Debug\GameBoy.exe .\roms\tetris.gb
 ```
 
-### CMake
+### Visual Studio (可選)
+1. 開啟 `CMakeLists.txt` 作為 CMake 專案。
+2. 設定組態 `Debug | x64`。
+3. 建置後執行：
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Debug
-build/Debug/GameBoy.exe ../../roms/cpu_instrs.gb
-build/Debug/GameBoy.exe ../../roms/dmg-acid2.gb
-# 或回到根目錄：
-./x64/Debug/GameBoy.exe ./roms/dmg-acid2.gb
+.\build\Debug\GameBoy.exe .\roms\cpu_instrs.gb
 ```
+
+## 按鍵映射
+
+模擬器使用以下鍵盤按鍵映射到 Game Boy 控制器：
+
+- **A**: A 鍵
+- **B**: S 鍵
+- **Start**: Enter 鍵
+- **Select**: Space 鍵
+- **方向鍵**:
+  - ↑: 上方向鍵
+  - ↓: 下方向鍵
+  - ←: 左方向鍵
+  - →: 右方向鍵
+
+確保模擬器窗口聚焦以接收輸入。
 
 ## 常用測試 ROM
 | ROM | 目的 |
@@ -88,6 +89,28 @@ build/Debug/GameBoy.exe ../../roms/dmg-acid2.gb
 ![CPU測試結果](cpu_test.png "CPU測試全通過")
 ![DMG-](dmg_acid2_test.png "DMG-酸測試全通過")
 ![Instr Timing](instr_timing_test.png "指令週期測試")
+![mem Timing](mem_timing_test.png "記憶體週期測試")
+![halt Bug](halt_bug_test.png "停止錯誤測試")
+
+
+### 測試 ROM 推薦執行順序
+
+1. **CPU/旗標/中斷**
+  - `cpu_instrs.gb`（blargg）：CPU 指令集、旗標、EI 延遲、中斷優先順序
+2. **PPU 圖像/時序**
+  - `dmg-acid2.gb`：PPU 掃描線、Mode 時序、Sprite 排序與遮蔽
+  - `instr_timing.gb`：CPU 各指令週期精確度
+3. **MMU/Timer/Interrupt/特殊行為**
+  - `mem_timing_1.gb`、`mem_timing_2.gb`：記憶體時序
+  - `interrupt_time.gb`：中斷時序
+  - `halt_bug.gb`、`oam_bug.gb`：特殊硬體 bug
+4. **APU（音源）**
+  - `dmg_sound.gb`：APU 四聲道、包絡、掃頻、雜訊
+  - `01-registers.gb` ~ `12-wave write while on.gb`：blargg APU 測試套件
+5. **遊戲驗證**
+  - `tetris.gb`：實際遊戲音效與畫面
+
+> 你已通過 1~3，建議依序挑戰 APU 與 MMU/Timer/Interrupt 相關測試！
 
 ### OAM / Sprite 測試與 acid2 使用說明
 `dmg-acid2.gb` 可用來檢驗：背景/視窗組合、Sprite 排序與遮蔽、Mode2/Mode3 時序。
@@ -145,5 +168,4 @@ OAM 項目解讀：
  - https://gbdev.io/pandocs/
 
 ---
-
-最後更新：2025-11-13
+最後更新：2025-11-14
