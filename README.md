@@ -105,7 +105,7 @@ cmake --build build --config Debug
 | ROM | 目的 |
 |-----|------|
 | `cpu_instrs.gb` | 驗證 CPU 指令與中斷行為（已全部通過） |
-| `dmg-acid2.gb` | 嚴格驗證 PPU 時序與圖像組合（已通過） |
+| `dmg-acid2.gb` | 嚴格驗證 PPU 時序與圖像組合（再次異常） |
 | `tetris.gb` | 實際遊戲功能驗證 |
 
 ## 測試結果
@@ -241,4 +241,5 @@ OAM 項目解讀：
  - https://gbdev.io/pandocs/
 
 ---
+
 最後更新：2025-11-16
