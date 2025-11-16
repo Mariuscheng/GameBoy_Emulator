@@ -157,9 +157,8 @@ void Emulator::run() {
 
         if (max_frames > 0 && frame_count >= max_frames) {
             const char* out = "frame_end.ppm";
-            if (save_framebuffer_ppm(out)) {
-                std::cout << "[SCREENSHOT] Saved framebuffer to " << out << std::endl;
-            }
+            // Save silently without console spam
+            (void)save_framebuffer_ppm(out);
             running = false;
         }
     }

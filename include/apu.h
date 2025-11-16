@@ -24,6 +24,14 @@ public:
     void get_audio_samples(float* buffer, int length);
 
 private:
+    // Register descriptor for table-driven APU register behavior
+    struct RegisterDescriptor {
+        uint8_t read_mask;          // Bits readable as actual value; others read back as 1
+        uint8_t write_mask;         // Bits writable when writing
+        bool    writable_when_off;  // Whether writable when APU power is off
+        uint8_t off_return_mask;    // Additional mask/value used when APU is off (used by NR52)
+    };
+
     // Constants
     static constexpr int CPU_CLOCK = 4194304;
     static constexpr int SAMPLE_RATE = 44100;
@@ -31,6 +39,12 @@ private:
 
     // Frame sequencer constants
     static constexpr int FRAME_SEQUENCER_PERIOD = 8192; // 512Hz
+
+    // Flat APU register storage for 0xFF10-0xFF26 (0x17 bytes)
+    std::array<uint8_t, 0x17> regs{};
+
+    // Wave RAM (0xFF30-0xFF3F), accessible regardless of power state
+    std::array<uint8_t, 16> wave_ram{};
 
     // Channel structures
     struct PulseChannel {
@@ -98,6 +112,18 @@ private:
     WaveChannel ch3;
     NoiseChannel ch4;
 
+    // Lightweight status per channel used by register logic
+    struct ChannelState {
+        bool enabled{false};
+        bool dac_on{false};
+        int  timer{0};
+    };
+
+    ChannelState ch1_state;
+    ChannelState ch2_state;
+    ChannelState ch3_state;
+    ChannelState ch4_state;
+
     // Sound control
     uint8_t nr50; // Master volume & VIN panning (0xFF24)
     uint8_t nr51; // Sound panning (0xFF25)
@@ -131,6 +157,14 @@ private:
     void trigger_channel(WaveChannel& ch);
     void trigger_channel(NoiseChannel& ch);
 
+    // Simplified helpers used by current implementation in apu.cpp
+    bool apu_powered() const { return (regs[0x16] & 0x80) != 0; }
+    uint8_t get_channel_status() const;
+    void power_off_apu();
+    void power_on_apu();
+    void update_dac_state(int channel_num);
+    void trigger_channel(int channel_num);
+
     // DAC check
     bool dac_enabled(const PulseChannel& ch) const { return (ch.envelope & 0xF0) != 0; }
     bool dac_enabled(const WaveChannel& ch) const { return ch.dac_enabled != 0; }
@@ -160,6 +194,9 @@ private:
         }
         return val;
     }
+
+    // Register table declaration (defined in apu.cpp)
+    static const RegisterDescriptor reg_table[0x17];
 };
 
 #endif // APU_H

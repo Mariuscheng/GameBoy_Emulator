@@ -369,31 +369,62 @@ void PPU::render_sprites(MMU& mmu) {
         }
     }
 
-    // Render sprites in OAM order (earlier index has priority)
-    for (const auto& sprite : sprites_on_line) {
-        uint8_t sprite_height = (lcdc & 0x04) ? 16 : 8;
-        int line_in_sprite = ly - (sprite.y - 16); // line relative to top of sprite
-        if (line_in_sprite < 0 || line_in_sprite >= sprite_height) continue;
+    // Per-pixel resolve with correct priority:
+    // - Smaller X coordinate has higher priority
+    // - If X equal, earlier OAM index has higher priority
+    if (!sprites_on_line.empty()) {
+        struct SpriteEval { const Sprite* s; bool xflip; bool behind_bg; uint8_t palette; uint16_t tile_addr; int row_in_tile; };
+        std::vector<SpriteEval> evals; evals.reserve(sprites_on_line.size());
 
-        bool yflip = (sprite.attributes & 0x40) != 0;
-        bool xflip = (sprite.attributes & 0x20) != 0;
-        bool behind_bg = (sprite.attributes & 0x80) != 0;
-        uint8_t palette = (sprite.attributes & 0x10) ? obp1 : obp0;
+        for (const auto& sprite : sprites_on_line) {
+            uint8_t sprite_height = (lcdc & 0x04) ? 16 : 8;
+            int line_in_sprite = ly - (sprite.y - 16);
+            if (line_in_sprite < 0 || line_in_sprite >= sprite_height) { continue; }
 
-        int effective_line = yflip ? (sprite_height - 1 - line_in_sprite) : line_in_sprite;
-        uint8_t base_tile_index = (sprite_height == 16) ? (sprite.tile & 0xFE) : sprite.tile;
-        uint8_t tile_index = base_tile_index + (effective_line / 8);
-        int row_in_tile = effective_line % 8;
-        uint16_t tile_addr = 0x8000 + tile_index * 16;
+            bool yflip = (sprite.attributes & 0x40) != 0;
+            bool xflip = (sprite.attributes & 0x20) != 0;
+            bool behind_bg = (sprite.attributes & 0x80) != 0;
+            uint8_t palette = (sprite.attributes & 0x10) ? obp1 : obp0;
 
-        for (int x = 0; x < 8; ++x) {
-            int px = xflip ? (7 - x) : x;
-            int screen_x = sprite.x + x - 8; // hardware X offset
-            if (screen_x < 0 || screen_x >= 160) continue;
-            uint8_t pixel = get_tile_pixel(mmu, tile_addr, px, row_in_tile);
-            if (pixel == 0) continue;
-            if (behind_bg && bgwin_pixel_ids[ly * 160 + screen_x] != 0) continue;
-            framebuffer[ly * 160 + screen_x] = get_color(pixel, palette);
+            int effective_line = yflip ? (sprite_height - 1 - line_in_sprite) : line_in_sprite;
+            uint8_t base_tile_index = (sprite_height == 16) ? (sprite.tile & 0xFE) : sprite.tile;
+            uint8_t tile_index = base_tile_index + (effective_line / 8);
+            int row_in_tile = effective_line % 8;
+            uint16_t tile_addr = 0x8000 + tile_index * 16;
+
+            evals.push_back(SpriteEval{ &sprite, xflip, behind_bg, palette, tile_addr, row_in_tile });
+        }
+
+        for (int screen_x = 0; screen_x < 160; ++screen_x) {
+            int best_idx = -1;
+            uint8_t best_x = 255; // smaller is better
+            uint8_t best_pixel = 0;
+            uint8_t best_palette = 0;
+
+            for (size_t i = 0; i < evals.size(); ++i) {
+                const auto& e = evals[i];
+                const auto& s = *e.s;
+                int start_x = (int)s.x - 8;
+                if (screen_x < start_x || screen_x >= start_x + 8) continue;
+
+                int px_in_sprite = screen_x - start_x;
+                int px = e.xflip ? (7 - px_in_sprite) : px_in_sprite;
+                uint8_t pixel = get_tile_pixel(mmu, e.tile_addr, (uint8_t)px, (uint8_t)e.row_in_tile);
+                if (pixel == 0) continue;
+                if (e.behind_bg && bgwin_pixel_ids[ly * 160 + screen_x] != 0) continue;
+
+                // Priority: smaller X wins; if equal X, earlier OAM (smaller i) wins
+                if (best_idx == -1 || s.x < best_x) {
+                    best_idx = (int)i;
+                    best_x = s.x;
+                    best_pixel = pixel;
+                    best_palette = e.palette;
+                }
+            }
+
+            if (best_idx != -1) {
+                framebuffer[ly * 160 + screen_x] = get_color(best_pixel, best_palette);
+            }
         }
     }
 
