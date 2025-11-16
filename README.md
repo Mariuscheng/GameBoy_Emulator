@@ -45,6 +45,24 @@ GameBoy/
 ```
 
 ## 編譯與執行
+### Windows 前置需求
+- Visual Studio 2022（含 C++ 桌面開發）或 MSVC 工具鏈
+- CMake 3.25+（VS 內建或獨立安裝皆可）
+- SDL3 執行階段（`SDL3.dll`）
+
+取得 SDL3 的常見做法：
+- 使用 vcpkg（建議）
+  1) 安裝 vcpkg 並 `vcpkg integrate install`
+  2) 安裝套件：`vcpkg install sdl3:x64-windows`
+  3) CMake 指定 toolchain（選用）：
+     ```powershell
+     cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows
+     ```
+  4) 執行時請確保 `SDL3.dll` 能被找到（通常在 `vcpkg\installed\x64-windows\bin\SDL3.dll`）；可將其複製到 `build\Debug` 同層。
+- 直接下載官方二進位（可攜式）
+  1) 到 SDL 官方 Release（libsdl-org/SDL）下載 Windows x64 zip
+  2) 將 `SDL3.dll` 解壓後放到 `build\Debug`（或加入到 PATH）
+
 ### CMake (推薦)
 ```powershell
 # 從專案根目錄
@@ -117,6 +135,11 @@ cmake --build build --config Debug
 
 > 你已通過 1~3，建議依序挑戰 APU 與 MMU/Timer/Interrupt 相關測試！
 
+提示：APU 測試 ROM 的檔名有空白，例如 `02-len ctr.gb`（不是 `02-len-ctr.gb`）。請務必以引號包住，或先用下列指令確認檔名：
+```powershell
+Get-ChildItem .\roms | Select-Object Name
+```
+
 ## APU 重構進度（概覽）
 - 表驅動暫存器表（`0xFF10–0xFF26`）：
   - 以 `read_mask`/`write_mask`/`writable_when_off` 描述各寄存器行為。
@@ -139,6 +162,28 @@ cmake --build build --config Debug
 .\build\Debug\GameBoy.exe ".\roms\02-len ctr.gb"
 Get-Content .\apu_trace.txt -Tail 100
 ```
+
+### SDL3 初始化疑難排解（視窗/音訊）
+- 視窗未顯示或程式立即結束：
+  - 請確認 `SDL3.dll` 與 `GameBoy.exe` 位於同一資料夾，或 `SDL3.dll` 在 PATH 中。
+  - 若使用 VS 執行，確保工作目錄為 `build\Debug`（或將 DLL 複製到該處）。
+- 音訊初始化失敗（Log 顯示 `SDL_Init(SDL_INIT_AUDIO) failed`）：
+  - 本專案會自動使用「靜音回退」，不影響畫面/測試；若要嘗試指定驅動：
+    ```powershell
+    # 嘗試 WASAPI（預設），或 DirectSound
+    $env:SDL_AUDIODRIVER = "wasapi"   # 或 "directsound"
+    .\build\Debug\GameBoy.exe ".\roms\dmg_sound.gb"
+    ```
+  - 亦可先以 `dummy` 驅動排除音訊驅動問題：
+    ```powershell
+    $env:SDL_AUDIODRIVER = "dummy"
+    .\build\Debug\GameBoy.exe ".\roms\01-registers.gb"
+    ```
+  - 請確認沒有其他獨佔音訊程式佔用輸出裝置。
+
+### 常見錯誤對照
+- `Failed to open ROM file`: 檔名/路徑錯誤，APU 測試請注意空白字元，例：`".\roms\02-len ctr.gb"`。
+- `SDL_Init(SDL_INIT_AUDIO) failed`: 僅音訊初始化失敗，功能仍可運作；可參考上節設定 `SDL_AUDIODRIVER` 或直接忽略。
 
 ### OAM / Sprite 測試與 acid2 使用說明
 `dmg-acid2.gb` 可用來檢驗：背景/視窗組合、Sprite 排序與遮蔽、Mode2/Mode3 時序。
