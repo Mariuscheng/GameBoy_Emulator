@@ -10,9 +10,9 @@ set(SDL3_DIR "C:/vcpkg/installed/x64-windows/share/sdl3")
 
 find_package(SDL3 CONFIG REQUIRED)
 
-include_directories(include)
+include_directories(include src/mmu)
 
-file(GLOB SOURCES src/*.cpp)
+file(GLOB_RECURSE SOURCES src/*.cpp)
 add_executable(GameBoy main.cpp ${SOURCES})
 
 target_link_libraries(GameBoy PRIVATE SDL3::SDL3)
